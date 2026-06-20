@@ -1,0 +1,12 @@
+[package]
+name = "bpfx"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aya-ebpf = "0.1.1"
+aya-ebpf-macros = "0.1.2"
+aya-log-ebpf = "0.1.0"
+
+[build-dependencies]
+bindgen = "0.72.1"

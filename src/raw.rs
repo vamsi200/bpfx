@@ -101,9 +101,6 @@ pub struct RawDnsEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct RawProcessStartEvent {
     pub header: RawEventHeader,
-
-    pub parent_pid: u32,
-
     pub filename: [u8; 256],
 }
 
@@ -111,8 +108,7 @@ pub struct RawProcessStartEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct RawProcessExitEvent {
     pub header: RawEventHeader,
-
-    pub exit_code: i32,
+    pub exit_code: i32, // convert this back - (code << 8) & 0xff
 }
 
 #[repr(C)]
@@ -125,10 +121,17 @@ pub struct RawFileOpenEvent {
     pub path: [u8; 256],
 }
 
+// #[repr(C)]
+// #[derive(Debug, Clone, Copy)]
+// pub struct rawfiledeleteevent {
+//     pub header: raweventheader,
+
+//     pub path: [u8; 256],
+// }
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct RawFileDeleteEvent {
+pub struct RawFileCloseEvent {
     pub header: RawEventHeader,
-
     pub path: [u8; 256],
 }

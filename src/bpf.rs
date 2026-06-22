@@ -3,9 +3,13 @@
 #![allow(unused)]
 #![allow(non_camel_case_types)]
 
+use crate::bindings::tcp_ca_event::CA_EVENT_ECN_IS_CE;
 use crate::bindings::{dentry, file, in6_addr, path, sockaddr};
 use crate::bindings::{sock, socket, task_struct};
-use crate::raw::{PendingConnect, RawConnectEvent, RawEventHeader};
+use crate::raw::{
+    PendingConnect, RawConnectEvent, RawEventHeader, RawFileCloseEvent, RawFileOpenEvent,
+    RawProcessExitEvent, RawProcessStartEvent,
+};
 use aya_ebpf::bindings::bpf_core_relo_kind::BPF_CORE_FIELD_BYTE_OFFSET;
 use aya_ebpf::cty::c_char;
 use aya_ebpf::helpers::r#gen::{
@@ -14,7 +18,7 @@ use aya_ebpf::helpers::r#gen::{
 };
 use aya_ebpf::helpers::{
     bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_probe_read_kernel,
-    bpf_probe_read_user,
+    bpf_probe_read_user, bpf_probe_read_user_str_bytes,
 };
 use aya_ebpf::macros::{lsm, tracepoint};
 use aya_ebpf::maps::ring_buf::RingBufEntry;
@@ -336,4 +340,174 @@ pub fn udp6_connect(ctx: FEntryContext) -> i32 {
 
 fn try_udp6_connect(ctx: FEntryContext) -> Result<i32, i32> {
     unsafe { try_v6_connect_impl(ctx, 2) }
+}
+
+#[tracepoint]
+fn sched_process_exec(ctx: TracePointContext) -> i32 {
+    match unsafe { try_sched_process_exec(ctx) } {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_sched_process_exec(ctx: TracePointContext) -> Result<i32, i32> {
+    unsafe {
+        let mut events = match EVENTS.reserve::<RawProcessStartEvent>(0) {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        let pid: i32 = match ctx.read_at(12) {
+            Ok(p) => p,
+            Err(_) => {
+                events.discard(0);
+                return Ok(0);
+            }
+        };
+
+        let file_name = ctx.read_at::<&str>(8).unwrap_or_default();
+        let mut filename = [0u8; 256];
+        filename.copy_from_slice(file_name.as_bytes());
+
+        events.write(RawProcessStartEvent {
+            header: build_event_header(),
+            filename: filename,
+        });
+        events.submit(0);
+    }
+
+    Ok(0)
+}
+
+#[fentry]
+fn do_group_exit(ctx: FEntryContext) -> i32 {
+    match unsafe { try_do_group_exit(ctx) } {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_do_group_exit(ctx: FEntryContext) -> Result<i32, i32> {
+    unsafe {
+        let mut events = match EVENTS.reserve::<RawProcessExitEvent>(0) {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        let exit_code: i32 = ctx.arg(0);
+        events.write(RawProcessExitEvent {
+            header: build_event_header(),
+            exit_code,
+        });
+
+        events.submit(0);
+    }
+    Ok(0)
+}
+
+#[tracepoint]
+fn sys_connect_exit(ctx: TracePointContext) -> i32 {
+    match unsafe { try_sys_connect_exit(ctx) } {
+        Ok(v) => v,
+        Err(_) => -1,
+    }
+}
+
+fn try_sys_connect_exit(ctx: TracePointContext) -> Result<i32, i32> {
+    unsafe { Ok(ctx.read_at(16).unwrap_or(-1)) }
+}
+
+#[tracepoint]
+fn sys_enter_openat(ctx: TracePointContext) -> i32 {
+    match unsafe { try_sys_enter_openat(ctx) } {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_sys_enter_openat(ctx: TracePointContext) -> Result<i32, i32> {
+    unsafe {
+        let mut event: RingBufEntry<RawFileOpenEvent> = match EVENTS.reserve::<RawFileOpenEvent>(0)
+        {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        let dfd: i32 = match ctx.read_at(16) {
+            Ok(fd) => fd,
+            Err(_) => {
+                event.discard(0);
+                return Ok(0);
+            }
+        };
+
+        let file_name_ptr: u64 = match ctx.read_at(24) {
+            Ok(fname) => fname,
+            Err(_) => {
+                event.discard(0);
+                return Ok(0);
+            }
+        };
+
+        let mut path = [0u8; 256];
+
+        bpf_probe_read_user_str_bytes(file_name_ptr as *const _, &mut path);
+
+        let flags: u32 = match ctx.read_at(32) {
+            Ok(fl) => fl,
+            Err(_) => {
+                event.discard(0);
+                return Ok(0);
+            }
+        };
+
+        event.write(RawFileOpenEvent {
+            header: build_event_header(),
+            flags,
+            path,
+        });
+
+        event.submit(0);
+    }
+    Ok(0)
+}
+
+#[fentry]
+pub fn filp_close(ctx: FEntryContext) -> i32 {
+    match try_flip_close(ctx) {
+        Ok(ret) => ret,
+        Err(_) => 0,
+    }
+}
+
+pub fn try_flip_close(ctx: FEntryContext) -> Result<i32, i32> {
+    unsafe {
+        let mut events = match EVENTS.reserve::<RawFileCloseEvent>(0) {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        let file: *const file = ctx.arg(0);
+
+        if file.is_null() {
+            events.discard(0);
+            return Ok(0);
+        }
+
+        let mut path = [0u8; 256];
+        let f_path: *const path = &(*file).__bindgen_anon_1.f_path;
+        let dentry: *const dentry = (*f_path).dentry;
+        let name_ptr = (*dentry).__bindgen_anon_1.d_name.name;
+
+        bpf_probe_read_user_str_bytes(name_ptr as *const _, &mut path);
+
+        events.write(RawFileCloseEvent {
+            header: build_event_header(),
+            path,
+        });
+
+        events.submit(0);
+    }
+
+    Ok(0)
 }

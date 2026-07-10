@@ -1,9 +1,9 @@
+#![no_std]
 #![allow(unused)]
-
 pub const TASK_COMM_LEN: usize = 16;
 pub const DNS_NAME_MAX: usize = 256;
 
-#[repr(u16)]
+#[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 pub enum EventType {
     Connect = 1,
@@ -14,11 +14,31 @@ pub enum EventType {
     ProcessExit = 6,
     FileOpen = 7,
     FileDelete = 8,
+    FileClose = 9,
+}
+
+impl TryFrom<u8> for EventType {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Connect),
+            2 => Ok(Self::Accept),
+            3 => Ok(Self::Close),
+            4 => Ok(Self::Dns),
+            5 => Ok(Self::ProcessStart),
+            6 => Ok(Self::ProcessExit),
+            7 => Ok(Self::FileOpen),
+            8 => Ok(Self::FileDelete),
+            9 => Ok(Self::FileClose),
+            _ => Err(()),
+        }
+    }
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RawEventHeader {
+    pub event_type: EventType,
     pub timestamp_ns: u64,
 
     pub pid: u32,
@@ -38,10 +58,20 @@ pub enum RawProtocol {
     Udp = 2,
 }
 
+impl TryFrom<u8> for RawProtocol {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Tcp),
+            2 => Ok(Self::Udp),
+            _ => Err(()),
+        }
+    }
+}
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct PendingConnect {
-    pub protocol: u8,
+    pub protocol: RawProtocol,
     pub tid: u32,
     pub src_port: u16,
     pub dst_port: u16,
@@ -51,7 +81,7 @@ pub struct PendingConnect {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct RawConnectEvent {
     pub header: RawEventHeader,
     pub family: u16,

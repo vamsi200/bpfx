@@ -4,9 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.103"
 aya-ebpf = "0.1.1"
 aya-ebpf-macros = "0.1.2"
 aya-log-ebpf = "0.1.0"
+aya = "0.13.1"
+bpfx-common = {path = "./bpfx-common/"}
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "signal", "full"] }
+env_logger = "0.11.11"
+aya-log = "0.2.1"
 
-[build-dependencies]
-bindgen = "0.72.1"
+[workspace]
+members = [
+    "bpfx-common",
+    "bpfx-ebpf",
+]

@@ -24,29 +24,12 @@ use std::net::IpAddr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
-    Tcp,
-    Udp,
+    Tcp = 1,
+    Udp = 2,
 }
 
 #[derive(Debug, Clone)]
-pub struct ConnectEvent {
-    pub header: EventHeader,
-
-    pub protocol: Protocol,
-
-    pub src_ip: IpAddr,
-    pub src_port: u16,
-
-    pub dst_ip: IpAddr,
-    pub dst_port: u16,
-}
-
-#[derive(Debug, Clone)]
-pub struct AcceptEvent {
-    pub header: EventHeader,
-
-    pub protocol: Protocol,
-
+pub struct SocketEndpoints {
     pub local_ip: IpAddr,
     pub local_port: u16,
 
@@ -54,17 +37,33 @@ pub struct AcceptEvent {
     pub remote_port: u16,
 }
 
+/// Emitted after the kernel completes processing a successful connect() call.
+/// Generated from `tcp_v4_connect()` and `tcp_v6_connect()`.
+#[derive(Debug, Clone)]
+pub struct ConnectEvent {
+    pub header: EventHeader,
+    pub protocol: Protocol,
+    pub endpoints: SocketEndpoints,
+}
+
+/// Emitted after the kernel accepts an incoming TCP connection.
+/// Generated from `inet_csk_accept()`.
+/// This event is only emitted for TCP.
+#[derive(Debug, Clone)]
+pub struct AcceptEvent {
+    pub header: EventHeader,
+    pub protocol: Protocol,
+    pub endpoints: SocketEndpoints,
+}
+
+/// Emitted when the kernel closes a socket.
+/// Generated from `tcp_close()` for TCP sockets and
+/// `udp_destroy_sock()` for UDP sockets.
 #[derive(Debug, Clone)]
 pub struct CloseEvent {
     pub header: EventHeader,
-
     pub protocol: Protocol,
-
-    pub src_ip: IpAddr,
-    pub src_port: u16,
-
-    pub dst_ip: IpAddr,
-    pub dst_port: u16,
+    pub endpoints: SocketEndpoints,
 }
 
 #[derive(Debug, Clone)]

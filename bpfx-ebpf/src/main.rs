@@ -27,11 +27,11 @@ use aya_ebpf::{EbpfContext, TASK_COMM_LEN};
 use aya_ebpf_macros::{fentry, map};
 use aya_ebpf_macros::{fexit, kretprobe};
 use aya_log_ebpf::info;
-use bpfx_common::raw::RawProtocol;
 use bpfx_common::raw::{
     EventType, PendingConnect, RawConnectEvent, RawEventHeader, RawFileCloseEvent,
     RawFileOpenEvent, RawProcessExitEvent, RawProcessStartEvent,
 };
+use bpfx_common::raw::{IpVersion, RawProtocol};
 use core::ffi::c_int;
 use core::panic::PanicInfo;
 use core::ptr::null;
@@ -66,7 +66,7 @@ pub struct SockaddrIn6 {
 }
 
 #[inline(always)]
-fn collect_process_ctx() -> (u64, u32, u32, i32, u32, u32, [u8; TASK_COMM_LEN]) {
+fn collect_process_ctx() -> (u64, u32, u32, u32, u32, u32, [u8; TASK_COMM_LEN]) {
     unsafe {
         let tgid = bpf_get_current_pid_tgid();
         let pid = (tgid >> 32) as u32;
@@ -76,19 +76,29 @@ fn collect_process_ctx() -> (u64, u32, u32, i32, u32, u32, [u8; TASK_COMM_LEN]) 
         let uid = uid_gid as u32;
         let gid = (uid_gid >> 32) as u32;
         let task = bpf_get_current_task_btf() as *const task_struct;
-        let parent_ptr = bpf_probe_read_kernel(core::ptr::addr_of!((*task).real_parent)).unwrap();
-        let ppid = bpf_probe_read_kernel(&(*parent_ptr).tgid).unwrap_or(0);
+        let parent_ptr = match bpf_probe_read_kernel(core::ptr::addr_of!((*task).real_parent)) {
+            Ok(p) => p,
+            Err(_) => core::ptr::null(),
+        };
+
+        let ppid = if parent_ptr.is_null() {
+            0 // not a good idea
+        } else {
+            bpf_probe_read_kernel(&(*parent_ptr).tgid).unwrap_or(0) as u32
+        };
+
+        let ppid = bpf_probe_read_kernel(&(*parent_ptr).tgid).unwrap_or(0) as u32;
         let comm = bpf_get_current_comm().unwrap_or([0u8; TASK_COMM_LEN]);
         (timestamp, pid, tid, ppid, uid, gid, comm)
     }
 }
 
 #[inline(always)]
-fn build_event_header(event_type: u8) -> RawEventHeader {
+fn build_event_header(event_type: EventType) -> RawEventHeader {
     unsafe {
         let (timestamp, pid, tid, ppid, uid, gid, comm) = collect_process_ctx();
         RawEventHeader {
-            event_type: EventType::try_from(event_type).unwrap(),
+            event_type,
             timestamp_ns: timestamp,
             pid,
             tid,
@@ -204,7 +214,7 @@ fn try_sys_enter_connect(ctx: TracePointContext) -> Result<i32, i32> {
         }
 
         event.write(RawConnectEvent {
-            header: build_event_header(1),
+            header: build_event_header(EventType::Connect),
             family,
         });
         event.submit(0);
@@ -228,7 +238,8 @@ impl SockProvider for RetProbeContext {
     }
 }
 
-fn emit_v4<C: SockProvider>(ctx: C, protocol: u8) -> Result<i32, i32> {
+#[inline(always)]
+fn emit_v4<C: SockProvider>(ctx: C, protocol: u8, event_type: EventType) -> Result<i32, i32> {
     unsafe {
         let mut event = match EVENTS.reserve::<PendingConnect>(0) {
             Some(e) => e,
@@ -249,10 +260,12 @@ fn emit_v4<C: SockProvider>(ctx: C, protocol: u8) -> Result<i32, i32> {
         src_addr[..4].copy_from_slice(&sock_rcv_saddr(sock).to_ne_bytes());
 
         event.write(PendingConnect {
+            header: build_event_header(event_type),
             protocol: RawProtocol::try_from(protocol).unwrap(),
             tid,
             src_port: sock_num(sock),
             dst_port: sock_dport(sock),
+            ip_version: IpVersion::V4,
             src_addr,
             dst_addr,
         });
@@ -262,7 +275,8 @@ fn emit_v4<C: SockProvider>(ctx: C, protocol: u8) -> Result<i32, i32> {
     Ok(0)
 }
 
-fn emit_v6<C: SockProvider>(ctx: C, protocol: u8) -> Result<i32, i32> {
+#[inline(always)]
+fn emit_v6<C: SockProvider>(ctx: C, protocol: u8, event_type: EventType) -> Result<i32, i32> {
     unsafe {
         let mut event = match EVENTS.reserve::<PendingConnect>(0) {
             Some(e) => e,
@@ -297,10 +311,12 @@ fn emit_v6<C: SockProvider>(ctx: C, protocol: u8) -> Result<i32, i32> {
         };
 
         event.write(PendingConnect {
+            header: build_event_header(event_type),
             protocol: RawProtocol::try_from(protocol).unwrap(),
             tid,
             src_port: sock_num(sock),
             dst_port: sock_dport(sock),
+            ip_version: IpVersion::V6,
             src_addr,
             dst_addr: daddr,
         });
@@ -321,7 +337,7 @@ pub fn tcp_v4_connect(ctx: FExitContext) -> i32 {
 
 fn try_tcp_v4_connect(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
-        emit_v4(ctx, 1);
+        emit_v4(ctx, 1, EventType::Connect);
     }
     Ok(0)
 }
@@ -360,8 +376,8 @@ fn try_inet_csk_accept_impl(ctx: RetProbeContext) -> Result<i32, i32> {
         info!(&ctx, "Family - {}", family);
 
         match family {
-            AF_INET => emit_v4(ctx, 1)?,
-            AF_INET6 => emit_v6(ctx, 1)?,
+            AF_INET => emit_v4(ctx, 1, EventType::Accept)?,
+            AF_INET6 => emit_v6(ctx, 1, EventType::Accept)?,
             _ => {
                 return Ok(0);
             }
@@ -390,8 +406,8 @@ fn try_tcp_close(ctx: FExitContext) -> Result<i32, i32> {
         };
 
         match family {
-            AF_INET => emit_v4(ctx, 1)?,
-            AF_INET6 => emit_v6(ctx, 1)?,
+            AF_INET => emit_v4(ctx, 1, EventType::Close)?,
+            AF_INET6 => emit_v6(ctx, 1, EventType::Close)?,
             _ => return Ok(0),
         };
     }
@@ -417,8 +433,8 @@ fn try_udp_destroy_sock(ctx: FExitContext) -> Result<i32, i32> {
         };
 
         match family {
-            AF_INET => emit_v4(ctx, 2)?,
-            AF_INET6 => emit_v6(ctx, 2)?,
+            AF_INET => emit_v4(ctx, 2, EventType::Close)?,
+            AF_INET6 => emit_v6(ctx, 2, EventType::Close)?,
             _ => return Ok(0),
         };
     }
@@ -435,7 +451,7 @@ pub fn tcp_v6_connect(ctx: FExitContext) -> i32 {
 }
 
 fn try_tcp_v6_connect(ctx: FExitContext) -> Result<i32, i32> {
-    unsafe { emit_v6(ctx, 1) }
+    unsafe { emit_v6(ctx, 1, EventType::Connect) }
 }
 
 #[inline(always)]
@@ -458,21 +474,21 @@ pub fn udp_connect(ctx: FExitContext) -> i32 {
 
 fn try_udp_connect(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
-        emit_v4(ctx, 2);
+        emit_v4(ctx, 2, EventType::Connect);
     }
     Ok(0)
 }
 
 #[fexit]
-pub fn udp6_connect(ctx: FExitContext) -> i32 {
-    match unsafe { try_udp6_connect(ctx) } {
+pub fn udpv6_connect(ctx: FExitContext) -> i32 {
+    match unsafe { try_udpv6_connect(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
 }
 
-fn try_udp6_connect(ctx: FExitContext) -> Result<i32, i32> {
-    unsafe { emit_v6(ctx, 2) }
+fn try_udpv6_connect(ctx: FExitContext) -> Result<i32, i32> {
+    unsafe { emit_v6(ctx, 2, EventType::Connect) }
 }
 
 #[tracepoint]
@@ -503,7 +519,7 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<i32, i32> {
         filename.copy_from_slice(file_name.as_bytes());
 
         events.write(RawProcessStartEvent {
-            header: build_event_header(5),
+            header: build_event_header(EventType::ProcessStart),
             filename: filename,
         });
         events.submit(0);
@@ -529,7 +545,7 @@ fn try_do_group_exit(ctx: FEntryContext) -> Result<i32, i32> {
 
         let exit_code: i32 = ctx.arg(0);
         events.write(RawProcessExitEvent {
-            header: build_event_header(6),
+            header: build_event_header(EventType::ProcessExit),
             exit_code,
         });
 
@@ -595,7 +611,7 @@ fn try_sys_enter_openat(ctx: TracePointContext) -> Result<i32, i32> {
         };
 
         event.write(RawFileOpenEvent {
-            header: build_event_header(7),
+            header: build_event_header(EventType::FileOpen),
             flags,
             path,
         });
@@ -635,7 +651,7 @@ pub fn try_flip_close(ctx: FEntryContext) -> Result<i32, i32> {
         bpf_probe_read_user_str_bytes(name_ptr as *const _, &mut path);
 
         events.write(RawFileCloseEvent {
-            header: build_event_header(9),
+            header: build_event_header(EventType::FileClose),
             path,
         });
 

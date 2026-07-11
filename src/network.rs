@@ -1,7 +1,8 @@
 #![allow(unused)]
 
-use crate::events::EventHeader;
-use std::net::IpAddr;
+use crate::{convert::convert_network_events, events::EventHeader};
+use futures::{Stream, StreamExt};
+use std::{net::IpAddr, pin::Pin, sync::mpsc};
 
 // expectation:
 // while let Some(event) = monitor.next().await {
@@ -37,8 +38,35 @@ pub struct SocketEndpoints {
     pub remote_port: u16,
 }
 
+// TODO: Change the name
+pub struct PollNetwork {
+    rx: tokio::sync::mpsc::Receiver<NetworkEvent>,
+}
+
+impl Stream for PollNetwork {
+    type Item = NetworkEvent;
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let pn = self.get_mut();
+        pn.rx.poll_recv(cx)
+    }
+}
+
+impl PollNetwork {
+    pub fn new() -> anyhow::Result<Self> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<NetworkEvent>(1024);
+        tokio::spawn(async move {
+            convert_network_events(tx).await.unwrap();
+        });
+        Ok(Self { rx })
+    }
+}
+
 /// Emitted after the kernel completes processing a successful connect() call.
-/// Generated from `tcp_v4_connect()` and `tcp_v6_connect()`.
+/// Generated from `tcp_v4_connect()` and `tcp_v6_connect()` fpr TCP.
+/// Generated from `udp_connect()` and `udpv6_connect()` fpr TCP.
 #[derive(Debug, Clone)]
 pub struct ConnectEvent {
     pub header: EventHeader,
@@ -72,3 +100,5 @@ pub enum NetworkEvent {
     Accept(AcceptEvent),
     Close(CloseEvent),
 }
+
+//NOTE: In future maybe include udp_sendmsg, udpv6_sendmsg for udp?

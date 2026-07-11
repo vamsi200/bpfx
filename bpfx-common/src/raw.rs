@@ -43,7 +43,7 @@ pub struct RawEventHeader {
 
     pub pid: u32,
     pub tid: u32,
-    pub ppid: i32,
+    pub ppid: u32,
 
     pub uid: u32,
     pub gid: u32,
@@ -68,14 +68,24 @@ impl TryFrom<u8> for RawProtocol {
         }
     }
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub enum IpVersion {
+    V4,
+    V6,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct PendingConnect {
+    pub header: RawEventHeader,
     pub protocol: RawProtocol,
     pub tid: u32,
     pub src_port: u16,
     pub dst_port: u16,
 
+    pub ip_version: IpVersion,
     pub src_addr: [u8; 16],
     pub dst_addr: [u8; 16],
 }

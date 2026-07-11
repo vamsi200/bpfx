@@ -13,6 +13,7 @@ bpfx-common = {path = "./bpfx-common/"}
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "signal", "full"] }
 env_logger = "0.11.11"
 aya-log = "0.2.1"
+futures = "0.3.32"
 
 [workspace]
 members = [

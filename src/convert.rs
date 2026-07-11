@@ -1,15 +1,18 @@
 #![allow(unused)]
-use crate::network::NetworkEvent::*;
-use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    ptr,
+use crate::network::{
+    EventMask, NetworkEvent::*, NetworkFilter, PollNetwork, Protocol, ProtocolMask,
 };
-
+use crate::process::ProcessEvent::*;
+use crate::process::*;
+use crate::process::{self, PollProcess, ProcessEvent, ProcessEventMask, ProcessFilter};
 use crate::{
     events::EventHeader,
     network::{AcceptEvent, CloseEvent, ConnectEvent, NetworkEvent, SocketEndpoints},
 };
 use anyhow::Result;
+use aya::maps::MapData;
+use aya::maps::ring_buf::RingBufItem;
+use aya::programs::TracePoint;
 use aya::{
     Btf, Ebpf, include_bytes_aligned,
     maps::RingBuf,
@@ -17,7 +20,94 @@ use aya::{
 };
 use aya_log::EbpfLogger;
 use bpfx_common::raw::*;
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    ptr,
+};
+use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::time::error::Elapsed;
+
+#[derive(Debug, Clone)]
+struct NetworkRegister {
+    filter: NetworkFilter,
+    tx: Sender<NetworkEvent>,
+}
+
+#[derive(Debug)]
+struct ProcessRegister {
+    filter: ProcessFilter,
+    tx: Sender<ProcessEvent>,
+}
+
+pub struct Bpfx {
+    bpf: Ebpf,
+    btf: Btf,
+    ringbuf: RingBuf<MapData>,
+    network: Option<NetworkRegister>,
+    process: Option<ProcessRegister>,
+}
+
+impl Bpfx {
+    pub fn new() -> anyhow::Result<Self> {
+        env_logger::init();
+
+        let mut bpf = Ebpf::load(include_bytes_aligned!(
+            "../target/bpfel-unknown-none/release/bpfx-ebpf"
+        ))?;
+
+        let btf = Btf::from_sys_fs()?;
+        EbpfLogger::init(&mut bpf)?;
+
+        let events = bpf
+            .take_map("EVENTS")
+            .ok_or_else(|| anyhow::anyhow!("EVENTS not found"))?;
+
+        let ringbuf = RingBuf::try_from(events)?;
+        Ok(Self {
+            bpf,
+            btf,
+            ringbuf,
+            network: None,
+            process: None,
+        })
+    }
+
+    pub fn poll_network(&mut self, filter: NetworkFilter) -> anyhow::Result<PollNetwork> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<NetworkEvent>(1024);
+        let nr = NetworkRegister { filter, tx };
+        attach_network_probe(&nr.filter, &mut self.bpf, &self.btf);
+        self.network = Some(nr);
+
+        Ok(PollNetwork { rx })
+    }
+
+    pub fn poll_process(&mut self, filter: ProcessFilter) -> anyhow::Result<PollProcess> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ProcessEvent>(1024);
+        let pr = ProcessRegister { filter, tx };
+        attach_process_probe(&pr.filter, &mut self.bpf, &self.btf);
+        self.process = Some(pr);
+        Ok(PollProcess { rx })
+    }
+
+    pub fn run(self) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+        tokio::spawn(async move { self.run_boy().await })
+    }
+
+    pub async fn run_boy(mut self) -> Result<()> {
+        loop {
+            if let Some(events) = self.ringbuf.next() {
+                if let Some(nr) = &self.network {
+                    convert_network_events(&mut self.bpf, &self.btf, &nr.tx, &nr.filter, &events)?;
+                }
+
+                if let Some(pr) = &self.process {
+                    convert_process_events(&mut self.bpf, &self.btf, &pr.tx, &pr.filter, &events)?;
+                }
+            }
+        }
+    }
+}
 
 fn parse_network_event(event: &PendingConnect) -> (EventHeader, SocketEndpoints) {
     let len = event
@@ -77,183 +167,334 @@ macro_rules! network_event {
     };
 }
 
-// Read and convert the raw event structs to structured and then send to channel..
-pub async fn convert_network_events(producer: mpsc::Sender<NetworkEvent>) -> Result<()> {
-    env_logger::init();
+macro_rules! process_event {
+    ($variant: ident, $ty: ident, $header: expr, $filename: expr) => {
+        ProcessEvent::$variant($ty {
+            header: $header,
+            filename: $filename,
+        })
+    };
+}
 
-    let mut bpf = Ebpf::load(include_bytes_aligned!(
-        "../target/bpfel-unknown-none/release/bpfx-ebpf"
-    ))?;
+const TCP_CONNECT: &[(&str, &str)] = &[
+    ("tcp_v4_connect", "tcp_v4_connect"),
+    ("tcp_v6_connect", "tcp_v6_connect"),
+];
 
-    EbpfLogger::init(&mut bpf)?;
-    let btf = Btf::from_sys_fs()?;
+const TCP_ACCEPT: &[(&str, &str)] = &[("inet_csk_accept", "inet_csk_accept")];
 
-    let prog: &mut FExit = bpf.program_mut("udp_connect").unwrap().try_into()?;
-    prog.load("udp_connect", &btf)?;
+const TCP_CLOSE: (&str, &str) = ("tcp_close", "tcp_close");
+
+const UDP_CONNECT: &[(&str, &str)] = &[
+    ("udp_connect", "udp_connect"),
+    ("udpv6_connect", "udpv6_connect"),
+];
+
+const UDP_CLOSE: (&str, &str) = ("udp_destroy_sock", "udp_destroy_sock");
+
+fn attach_fexit(
+    bpf: &mut Ebpf,
+    btf: &Btf,
+    prog_name: &'static str,
+    func_name: &'static str,
+) -> Result<()> {
+    let prog: &mut FExit = bpf.program_mut(prog_name).unwrap().try_into()?; // dont unwrap here??
+    prog.load(func_name, btf)?;
     prog.attach()?;
+    Ok(())
+}
 
-    let prog: &mut FExit = bpf.program_mut("udpv6_connect").unwrap().try_into()?;
-    prog.load("udpv6_connect", &btf)?;
-    prog.attach()?;
-
-    let prog: &mut FExit = bpf.program_mut("udp_destroy_sock").unwrap().try_into()?;
-    prog.load("udp_destroy_sock", &btf)?;
-    prog.attach()?;
-
-    let prog: &mut FExit = bpf.program_mut("tcp_v4_connect").unwrap().try_into()?;
-    prog.load("tcp_v4_connect", &btf)?;
-    prog.attach()?;
-
-    let prog: &mut FExit = bpf.program_mut("tcp_v6_connect").unwrap().try_into()?;
-    prog.load("tcp_v6_connect", &btf)?;
-    prog.attach()?;
-
-    let prog: &mut KProbe = bpf.program_mut("inet_csk_accept").unwrap().try_into()?;
+fn attach_kprobe(bpf: &mut Ebpf, prog_name: &'static str, symbol: &'static str) -> Result<()> {
+    let prog: &mut KProbe = bpf.program_mut(prog_name).unwrap().try_into()?;
     prog.load()?;
-    prog.attach("inet_csk_accept", 0)?;
+    prog.attach(symbol, 0)?;
+    Ok(())
+}
 
-    let prog: &mut FExit = bpf.program_mut("tcp_close").unwrap().try_into()?;
-    prog.load("tcp_close", &btf)?;
+fn attach_fentry(
+    bpf: &mut Ebpf,
+    btf: &Btf,
+    prog_name: &'static str,
+    symbol: &'static str,
+) -> Result<()> {
+    let prog: &mut FEntry = bpf.program_mut(prog_name).unwrap().try_into()?;
+    prog.load(prog_name, &btf)?;
     prog.attach()?;
+    Ok(())
+}
 
-    println!("[INFO] Running..");
+fn attach_tracepoint(
+    bpf: &mut Ebpf,
+    prog_name: &'static str,
+    category: &'static str,
+    tracepoint: &'static str,
+) -> Result<()> {
+    let prog: &mut TracePoint = bpf.program_mut(prog_name).unwrap().try_into()?;
+    prog.load()?;
+    prog.attach(category, tracepoint)?;
+    Ok(())
+}
 
-    if bpf.map("EVENTS").is_none() {
-        println!("EVENTS not found");
-    }
-    let events_map = bpf
-        .take_map("EVENTS")
-        .ok_or_else(|| anyhow::anyhow!("Faild to get map"))?;
+fn handle_connect(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) -> Result<()> {
+    let (header, endpoints) = parse_network_event(&event);
 
-    let mut ring_buffer = RingBuf::try_from(events_map)?;
-
-    loop {
-        if let Some(events) = ring_buffer.next() {
-            let ptr = events.as_ptr();
-            let event = unsafe { ptr::read(ptr as *const PendingConnect) };
-
-            match event.protocol {
-                RawProtocol::Tcp => match event.header.event_type {
-                    EventType::Connect => {
-                        let protocol = crate::network::Protocol::Tcp;
-                        let (header, endpoints) = parse_network_event(&event);
-
-                        match producer.try_send(network_event!(
-                            Connect,
-                            ConnectEvent,
-                            header,
-                            protocol,
-                            endpoints
-                        )) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(val)) => {
-                                eprintln!("Failed to send to channel")
-                            }
-                            Err(TrySendError::Closed(val)) => {
-                                eprintln!("Channel Closed :/");
-                            }
-                        }
-                    }
-
-                    EventType::Accept => {
-                        let (header, endpoints) = parse_network_event(&event);
-                        let protocol = crate::network::Protocol::Tcp;
-                        match producer.try_send(network_event!(
-                            Accept,
-                            AcceptEvent,
-                            header,
-                            protocol,
-                            endpoints
-                        )) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(val)) => {
-                                eprintln!("Failed to send to channel")
-                            }
-                            Err(TrySendError::Closed(val)) => {
-                                eprintln!("Channel Closed :/");
-                            }
-                        }
-                    }
-
-                    EventType::Close => {
-                        let (header, endpoints) = parse_network_event(&event);
-                        let protocol = crate::network::Protocol::Tcp;
-                        match producer.try_send(network_event!(
-                            Close, CloseEvent, header, protocol, endpoints
-                        )) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(val)) => {
-                                eprintln!("Failed to send to channel")
-                            }
-                            Err(TrySendError::Closed(val)) => {
-                                eprintln!("Channel Closed :/");
-                            }
-                        }
-                    }
-                    _ => {}
-                },
-
-                RawProtocol::Udp => match event.header.event_type {
-                    EventType::Connect => {
-                        let protocol = crate::network::Protocol::Udp;
-                        let (header, endpoints) = parse_network_event(&event);
-
-                        match producer.try_send(network_event!(
-                            Connect,
-                            ConnectEvent,
-                            header,
-                            protocol,
-                            endpoints
-                        )) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(val)) => {
-                                eprintln!("Failed to send to channel")
-                            }
-                            Err(TrySendError::Closed(val)) => {
-                                eprintln!("Channel Closed :/");
-                            }
-                        }
-                    }
-                    EventType::Accept => {
-                        let (header, endpoints) = parse_network_event(&event);
-                        let protocol = crate::network::Protocol::Udp;
-                        match producer.try_send(network_event!(
-                            Accept,
-                            AcceptEvent,
-                            header,
-                            protocol,
-                            endpoints
-                        )) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(val)) => {
-                                eprintln!("Failed to send to channel")
-                            }
-                            Err(TrySendError::Closed(val)) => {
-                                eprintln!("Channel Closed :/");
-                            }
-                        }
-                    }
-
-                    EventType::Close => {
-                        let (header, endpoints) = parse_network_event(&event);
-                        let protocol = crate::network::Protocol::Udp;
-                        match producer.try_send(network_event!(
-                            Close, CloseEvent, header, protocol, endpoints
-                        )) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(val)) => {
-                                eprintln!("Failed to send to channel")
-                            }
-                            Err(TrySendError::Closed(val)) => {
-                                eprintln!("Channel Closed :/");
-                            }
-                        }
-                    }
-
-                    _ => {}
-                },
+    match event.protocol {
+        RawProtocol::Tcp => {
+            match producer.try_send(network_event!(
+                Connect,
+                ConnectEvent,
+                header,
+                Protocol::Tcp,
+                endpoints
+            )) {
+                Ok(()) => {}
+                Err(TrySendError::Full(val)) => {
+                    eprintln!("Failed to send to channel")
+                }
+                Err(TrySendError::Closed(val)) => {
+                    eprintln!("Channel Closed :/");
+                }
             }
         }
+
+        RawProtocol::Udp => {
+            match producer.try_send(network_event!(
+                Connect,
+                ConnectEvent,
+                header,
+                Protocol::Udp,
+                endpoints
+            )) {
+                Ok(()) => {}
+                Err(TrySendError::Full(val)) => {
+                    eprintln!("Failed to send to channel")
+                }
+                Err(TrySendError::Closed(val)) => {
+                    eprintln!("Channel Closed :/");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_tcp_accept(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) -> Result<()> {
+    let (header, endpoints) = parse_network_event(&event);
+    let protocol = crate::network::Protocol::Tcp;
+    match producer.try_send(network_event!(
+        Accept,
+        AcceptEvent,
+        header,
+        protocol,
+        endpoints
+    )) {
+        Ok(()) => {}
+        Err(TrySendError::Full(val)) => {
+            eprintln!("Failed to send to channel")
+        }
+        Err(TrySendError::Closed(val)) => {
+            eprintln!("Channel Closed :/");
+        }
+    }
+    Ok(())
+}
+
+fn handle_close(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) -> Result<()> {
+    let (header, endpoints) = parse_network_event(&event);
+
+    match event.protocol {
+        RawProtocol::Tcp => {
+            match producer.try_send(network_event!(
+                Close,
+                CloseEvent,
+                header,
+                Protocol::Tcp,
+                endpoints
+            )) {
+                Ok(()) => {}
+                Err(TrySendError::Full(val)) => {
+                    eprintln!("Failed to send to channel")
+                }
+                Err(TrySendError::Closed(val)) => {
+                    eprintln!("Channel Closed :/");
+                }
+            }
+        }
+
+        RawProtocol::Udp => {
+            match producer.try_send(network_event!(
+                Close,
+                CloseEvent,
+                header,
+                Protocol::Udp,
+                endpoints
+            )) {
+                Ok(()) => {}
+                Err(TrySendError::Full(val)) => {
+                    eprintln!("Failed to send to channel")
+                }
+                Err(TrySendError::Closed(val)) => {
+                    eprintln!("Channel Closed :/");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn attach_network_probe(filter: &NetworkFilter, bpf: &mut Ebpf, btf: &Btf) {
+    if filter.protocols.contains(&ProtocolMask::TCP) && filter.events.contains(&EventMask::CONNECT)
+    {
+        for probe in TCP_CONNECT {
+            attach_fexit(bpf, &btf, probe.0, probe.1);
+        }
+    }
+
+    if filter.protocols.contains(&ProtocolMask::TCP) && filter.events.contains(&EventMask::ACCEPT) {
+        for probe in TCP_ACCEPT {
+            attach_kprobe(bpf, probe.0, probe.1);
+        }
+    }
+
+    if filter.protocols.contains(&ProtocolMask::TCP) && filter.events.contains(&EventMask::CLOSE) {
+        attach_kprobe(bpf, TCP_CLOSE.0, TCP_CLOSE.1);
+    }
+
+    if filter.protocols.contains(&ProtocolMask::UDP) && filter.events.contains(&EventMask::CONNECT)
+    {
+        for probe in UDP_CONNECT {
+            attach_fexit(bpf, &btf, probe.0, probe.1);
+        }
+    }
+
+    if filter.protocols.contains(&ProtocolMask::UDP) && filter.events.contains(&EventMask::CLOSE) {
+        attach_fexit(bpf, &btf, UDP_CLOSE.0, UDP_CLOSE.1);
+    }
+}
+
+// Read and convert the raw event structs to structured and then send to channel..
+pub fn convert_network_events(
+    bpf: &mut Ebpf,
+    btf: &Btf,
+    producer: &mpsc::Sender<NetworkEvent>,
+    filter: &NetworkFilter,
+    events: &RingBufItem<'_>,
+) -> Result<()> {
+    let ptr = events.as_ptr();
+    let event = unsafe { ptr::read(ptr as *const PendingConnect) };
+
+    match event.header.event_type {
+        EventType::Connect => handle_connect(&event, &producer)?,
+        EventType::Accept => handle_tcp_accept(&event, &producer)?,
+        EventType::Close => handle_close(&event, &producer)?,
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn attach_process_probe(filter: &ProcessFilter, bpf: &mut Ebpf, btf: &Btf) -> anyhow::Result<()> {
+    if filter.event_type.contains(&ProcessEventMask::START) {
+        attach_tracepoint(bpf, "sched_process_exec", "sched", "sched_process_exec")?;
+    }
+
+    if filter.event_type.contains(&ProcessEventMask::EXIT) {
+        attach_fentry(bpf, &btf, "do_group_exit", "do_group_exit")?;
+    }
+
+    Ok(())
+}
+
+pub fn convert_process_events(
+    bpf: &mut Ebpf,
+    btf: &Btf,
+    producer: &mpsc::Sender<ProcessEvent>,
+    filter: &ProcessFilter,
+    events: &RingBufItem<'_>,
+) -> anyhow::Result<()> {
+    let ptr = events.as_ptr();
+    let header = unsafe { ptr::read(ptr as *const RawEventHeader) };
+
+    match header.event_type {
+        EventType::ProcessStart => {
+            let event = unsafe { ptr::read(ptr as *const RawProcessStartEvent) };
+            let len = event
+                .header
+                .comm
+                .iter()
+                .position(|&s| s == 0)
+                .unwrap_or(event.header.comm.len());
+
+            let event_header = EventHeader {
+                timestamp_ns: event.header.timestamp_ns,
+                pid: event.header.pid,
+                tid: event.header.tid,
+                ppid: event.header.ppid,
+                uid: event.header.uid,
+                gid: event.header.gid,
+                comm: String::from_utf8_lossy(&event.header.comm[..len]).into_owned(),
+            };
+
+            let file_name_len = event
+                .filename
+                .iter()
+                .position(|&x| x == 0)
+                .unwrap_or(event.filename.len());
+
+            let filename = String::from_utf8_lossy(&event.filename[..file_name_len]).into_owned();
+
+            match producer.try_send(process_event!(
+                Start,
+                ProcessStartEvent,
+                event_header,
+                filename
+            )) {
+                Ok(()) => {}
+                Err(TrySendError::Full(val)) => {
+                    eprintln!("Failed to send to channel")
+                }
+                Err(TrySendError::Closed(val)) => {
+                    eprintln!("Channel Closed :/");
+                }
+            }
+        }
+
+        EventType::ProcessExit => {
+            let event = unsafe { ptr::read(ptr as *const RawProcessExitEvent) };
+            let len = event
+                .header
+                .comm
+                .iter()
+                .position(|&s| s == 0)
+                .unwrap_or(event.header.comm.len());
+
+            let event_header = EventHeader {
+                timestamp_ns: event.header.timestamp_ns,
+                pid: event.header.pid,
+                tid: event.header.tid,
+                ppid: event.header.ppid,
+                uid: event.header.uid,
+                gid: event.header.gid,
+                comm: String::from_utf8_lossy(&event.header.comm[..len]).into_owned(),
+            };
+
+            match producer.try_send(ProcessEvent::Exit(ProcessExitEvent {
+                header: event_header,
+                exit_code: event.exit_code,
+            })) {
+                Ok(()) => {}
+                Err(TrySendError::Full(val)) => {
+                    eprintln!("Failed to send to channel")
+                }
+                Err(TrySendError::Closed(val)) => {
+                    eprintln!("Channel Closed :/");
+                }
+            };
+        }
+
+        _ => {}
     }
 
     Ok(())

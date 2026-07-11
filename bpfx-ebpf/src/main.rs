@@ -28,8 +28,8 @@ use aya_ebpf_macros::{fentry, map};
 use aya_ebpf_macros::{fexit, kretprobe};
 use aya_log_ebpf::info;
 use bpfx_common::raw::{
-    EventType, PendingConnect, RawConnectEvent, RawEventHeader, RawFileCloseEvent,
-    RawFileOpenEvent, RawProcessExitEvent, RawProcessStartEvent,
+    EventType, PendingConnect, RawEventHeader, RawFileCloseEvent, RawFileOpenEvent,
+    RawProcessExitEvent, RawProcessStartEvent,
 };
 use bpfx_common::raw::{IpVersion, RawProtocol};
 use core::ffi::c_int;
@@ -41,14 +41,6 @@ const AF_INET6: u16 = 10;
 
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(4 * 1024 * 1024, 0);
-
-#[tracepoint]
-pub fn sys_enter_connect(ctx: TracePointContext) -> i32 {
-    match unsafe { try_sys_enter_connect(ctx) } {
-        Ok(v) => v,
-        Err(_) => 0,
-    }
-}
 
 pub struct SockAddrIn {
     pub sin_family: u16,
@@ -164,62 +156,6 @@ fn sock_num(sock: *const sock) -> u16 {
         ))
         .unwrap_or(0)
     }
-}
-
-fn try_sys_enter_connect(ctx: TracePointContext) -> Result<i32, i32> {
-    unsafe {
-        let mut event = match EVENTS.reserve::<RawConnectEvent>(0) {
-            Some(ev) => ev,
-            None => return Ok(0),
-        };
-
-        let sock_addr_ptr: u64 = ctx.read_at(24).unwrap_or(0);
-        let family: u16 = match bpf_probe_read_user(sock_addr_ptr as *const u16) {
-            Ok(f) => f,
-            Err(_) => {
-                event.discard(0);
-                return Ok(0);
-            }
-        };
-
-        if family != AF_INET && family != AF_INET6 {
-            event.discard(0);
-            return Ok(0);
-        }
-
-        //let sock_fd: u64 = ctx.read_at(16).unwrap_or(0);
-        let mut addr_buf = [0u8; 16];
-        let mut port: u16 = 0;
-
-        if family == AF_INET {
-            let sa: SockAddrIn = match bpf_probe_read_user(sock_addr_ptr as *const SockAddrIn) {
-                Ok(v) => v,
-                Err(_) => {
-                    event.discard(0);
-                    return Ok(0);
-                }
-            };
-            port = u16::from_be(sa.sin_port);
-            addr_buf[..4].copy_from_slice(&sa.sin_addr);
-        } else {
-            let sa: SockaddrIn6 = match bpf_probe_read_user(sock_addr_ptr as *const SockaddrIn6) {
-                Ok(v) => v,
-                Err(_) => {
-                    event.discard(0);
-                    return Ok(0);
-                }
-            };
-            port = u16::from_be(sa.sin6_port);
-            addr_buf[..16].copy_from_slice(&sa.sin6_addr);
-        }
-
-        event.write(RawConnectEvent {
-            header: build_event_header(EventType::Connect),
-            family,
-        });
-        event.submit(0);
-    }
-    Ok(0)
 }
 
 trait SockProvider {
@@ -492,7 +428,7 @@ fn try_udpv6_connect(ctx: FExitContext) -> Result<i32, i32> {
 }
 
 #[tracepoint]
-fn sched_process_exec(ctx: TracePointContext) -> i32 {
+pub fn sched_process_exec(ctx: TracePointContext) -> i32 {
     match unsafe { try_sched_process_exec(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
@@ -506,22 +442,31 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<i32, i32> {
             None => return Ok(0),
         };
 
-        let pid: i32 = match ctx.read_at(12) {
-            Ok(p) => p,
+        let data_loc: u32 = match ctx.read_at(8) {
+            Ok(v) => v,
             Err(_) => {
                 events.discard(0);
                 return Ok(0);
             }
         };
 
-        let file_name = ctx.read_at::<&str>(8).unwrap_or_default();
+        let offset = (data_loc & 0xffff) as usize;
+        let len = (data_loc >> 16) as usize;
+        let p = (ctx.as_ptr() as *const u8).add(offset);
+
         let mut filename = [0u8; 256];
-        filename.copy_from_slice(file_name.as_bytes());
+
+        bpf_probe_read_kernel_str(
+            filename.as_mut_ptr() as *mut _,
+            filename.len() as u32,
+            p as *const _,
+        );
 
         events.write(RawProcessStartEvent {
             header: build_event_header(EventType::ProcessStart),
             filename: filename,
         });
+
         events.submit(0);
     }
 

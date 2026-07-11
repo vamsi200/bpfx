@@ -90,42 +90,42 @@ pub struct PendingConnect {
     pub dst_addr: [u8; 16],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct RawConnectEvent {
-    pub header: RawEventHeader,
-    pub family: u16,
-}
+// #[repr(C)]
+// #[derive(Clone, Copy, Debug)]
+// pub struct RawConnectEvent {
+//     pub header: RawEventHeader,
+//     pub family: u16,
+// }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct RawAcceptEvent {
-    pub header: RawEventHeader,
-
-    pub protocol: u8,
-    pub family: u8,
-
-    pub local_addr: [u8; 16],
-    pub remote_addr: [u8; 16],
-
-    pub local_port: u16,
-    pub remote_port: u16,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct RawCloseEvent {
-    pub header: RawEventHeader,
-
-    pub protocol: u8,
-    pub family: u8,
-
-    pub src_addr: [u8; 16],
-    pub dst_addr: [u8; 16],
-
-    pub src_port: u16,
-    pub dst_port: u16,
-}
+// #[repr(C)]
+// #[derive(Debug, Clone, Copy)]
+// pub struct RawAcceptEvent {
+//     pub header: RawEventHeader,
+//
+//     pub protocol: u8,
+//     pub family: u8,
+//
+//     pub local_addr: [u8; 16],
+//     pub remote_addr: [u8; 16],
+//
+//     pub local_port: u16,
+//     pub remote_port: u16,
+// }
+//
+// #[repr(C)]
+// #[derive(Debug, Clone, Copy)]
+// pub struct RawCloseEvent {
+//     pub header: RawEventHeader,
+//
+//     pub protocol: u8,
+//     pub family: u8,
+//
+//     pub src_addr: [u8; 16],
+//     pub dst_addr: [u8; 16],
+//
+//     pub src_port: u16,
+//     pub dst_port: u16,
+// }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

@@ -1,10 +1,13 @@
 #![allow(unused)]
+use crate::file::{FileCloseEvent, FileEvent, FileEventMask, FileFilter, FileOpenEvent, PollFile};
 use crate::network::{
     EventMask, NetworkEvent::*, NetworkFilter, PollNetwork, Protocol, ProtocolMask,
 };
 use crate::process::ProcessEvent::*;
 use crate::process::*;
-use crate::process::{self, PollProcess, ProcessEvent, ProcessEventMask, ProcessFilter};
+use crate::process::{
+    self, PollProcess, ProcessEvent, ProcessEventMask, ProcessExitEvent, ProcessFilter,
+};
 use crate::{
     events::EventHeader,
     network::{AcceptEvent, CloseEvent, ConnectEvent, NetworkEvent, SocketEndpoints},
@@ -40,12 +43,19 @@ struct ProcessRegister {
     tx: Sender<ProcessEvent>,
 }
 
+#[derive(Debug)]
+struct FileRegister {
+    filter: FileFilter,
+    tx: Sender<FileEvent>,
+}
+
 pub struct Bpfx {
     bpf: Ebpf,
     btf: Btf,
     ringbuf: RingBuf<MapData>,
     network: Option<NetworkRegister>,
     process: Option<ProcessRegister>,
+    file: Option<FileRegister>,
 }
 
 impl Bpfx {
@@ -70,6 +80,7 @@ impl Bpfx {
             ringbuf,
             network: None,
             process: None,
+            file: None,
         })
     }
 
@@ -90,6 +101,15 @@ impl Bpfx {
         Ok(PollProcess { rx })
     }
 
+    pub fn poll_file(&mut self, filter: FileFilter) -> anyhow::Result<PollFile> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<FileEvent>(1024);
+        let fr = FileRegister { filter, tx };
+        attach_file_probe(&fr.filter, &mut self.bpf, &self.btf);
+        self.file = Some(fr);
+
+        Ok(PollFile { rx })
+    }
+
     pub fn run(self) -> tokio::task::JoinHandle<anyhow::Result<()>> {
         tokio::spawn(async move { self.run_boy().await })
     }
@@ -103,6 +123,10 @@ impl Bpfx {
 
                 if let Some(pr) = &self.process {
                     convert_process_events(&mut self.bpf, &self.btf, &pr.tx, &pr.filter, &events)?;
+                }
+
+                if let Some(pr) = &self.file {
+                    convert_file_events(&mut self.bpf, &self.btf, &pr.tx, &pr.filter, &events)?;
                 }
             }
         }
@@ -168,10 +192,34 @@ macro_rules! network_event {
 }
 
 macro_rules! process_event {
-    ($variant: ident, $ty: ident, $header: expr, $filename: expr) => {
-        ProcessEvent::$variant($ty {
+    (start, $header:expr, $filename:expr) => {
+        ProcessEvent::Start(ProcessStartEvent {
             header: $header,
             filename: $filename,
+        })
+    };
+
+    (exit, $header:expr, $exit_code:expr) => {
+        ProcessEvent::Exit(ProcessExitEvent {
+            header: $header,
+            exit_code: $exit_code,
+        })
+    };
+}
+
+macro_rules! file_event {
+    ($variant: ident, $ty: ident, $header: expr, $path: expr) => {
+        FileEvent::$variant($ty {
+            header: $header,
+            path: $path,
+        })
+    };
+
+    ($variant: ident, $ty: ident, $header: expr, $flags: expr, $path: expr) => {
+        FileEvent::$variant($ty {
+            header: $header,
+            flags: $flags,
+            path: $path,
         })
     };
 }
@@ -407,6 +455,24 @@ fn attach_process_probe(filter: &ProcessFilter, bpf: &mut Ebpf, btf: &Btf) -> an
     Ok(())
 }
 
+fn convert_header(header: RawEventHeader) -> EventHeader {
+    let len = header
+        .comm
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(header.comm.len());
+
+    EventHeader {
+        timestamp_ns: header.timestamp_ns,
+        pid: header.pid,
+        tid: header.tid,
+        ppid: header.ppid,
+        uid: header.uid,
+        gid: header.gid,
+        comm: String::from_utf8_lossy(&header.comm[..len]).into_owned(),
+    }
+}
+
 pub fn convert_process_events(
     bpf: &mut Ebpf,
     btf: &Btf,
@@ -427,29 +493,16 @@ pub fn convert_process_events(
                 .position(|&s| s == 0)
                 .unwrap_or(event.header.comm.len());
 
-            let event_header = EventHeader {
-                timestamp_ns: event.header.timestamp_ns,
-                pid: event.header.pid,
-                tid: event.header.tid,
-                ppid: event.header.ppid,
-                uid: event.header.uid,
-                gid: event.header.gid,
-                comm: String::from_utf8_lossy(&event.header.comm[..len]).into_owned(),
-            };
-
             let file_name_len = event
                 .filename
                 .iter()
                 .position(|&x| x == 0)
                 .unwrap_or(event.filename.len());
 
-            let filename = String::from_utf8_lossy(&event.filename[..file_name_len]).into_owned();
-
             match producer.try_send(process_event!(
-                Start,
-                ProcessStartEvent,
-                event_header,
-                filename
+                start,
+                convert_header(event.header),
+                String::from_utf8_lossy(&event.filename[..file_name_len]).into_owned()
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(val)) => {
@@ -470,20 +523,11 @@ pub fn convert_process_events(
                 .position(|&s| s == 0)
                 .unwrap_or(event.header.comm.len());
 
-            let event_header = EventHeader {
-                timestamp_ns: event.header.timestamp_ns,
-                pid: event.header.pid,
-                tid: event.header.tid,
-                ppid: event.header.ppid,
-                uid: event.header.uid,
-                gid: event.header.gid,
-                comm: String::from_utf8_lossy(&event.header.comm[..len]).into_owned(),
-            };
-
-            match producer.try_send(ProcessEvent::Exit(ProcessExitEvent {
-                header: event_header,
-                exit_code: event.exit_code,
-            })) {
+            match producer.try_send(process_event!(
+                exit,
+                convert_header(event.header),
+                event.exit_code
+            )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(val)) => {
                     eprintln!("Failed to send to channel")
@@ -492,6 +536,96 @@ pub fn convert_process_events(
                     eprintln!("Channel Closed :/");
                 }
             };
+        }
+
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn attach_file_probe(filter: &FileFilter, bpf: &mut Ebpf, btf: &Btf) {
+    if filter.event_type.contains(&FileEventMask::OPEN) {
+        attach_tracepoint(bpf, "sys_enter_openat", "syscalls", "sys_enter_openat");
+    }
+
+    if filter.event_type.contains(&FileEventMask::CLOSE) {
+        attach_fentry(bpf, btf, "filp_close", "filp_close");
+    }
+}
+
+fn convert_file_events(
+    bpf: &mut Ebpf,
+    btf: &Btf,
+    producer: &mpsc::Sender<FileEvent>,
+    filter: &FileFilter,
+    events: &RingBufItem<'_>,
+) -> anyhow::Result<()> {
+    let ptr = events.as_ptr();
+    let header = unsafe { ptr::read(ptr as *const RawEventHeader) };
+
+    match header.event_type {
+        EventType::FileOpen => {
+            let event = unsafe { ptr::read(ptr as *const RawFileOpenEvent) };
+            let len = event
+                .header
+                .comm
+                .iter()
+                .position(|&s| s == 0)
+                .unwrap_or(event.header.comm.len());
+
+            let path_len = event
+                .path
+                .iter()
+                .position(|&x| x == 0)
+                .unwrap_or(event.path.len());
+
+            match producer.try_send(file_event!(
+                FileOpen,
+                FileOpenEvent,
+                convert_header(event.header),
+                event.flags,
+                String::from_utf8_lossy(&event.path[..path_len]).into_owned()
+            )) {
+                Ok(()) => {}
+                Err(TrySendError::Full(val)) => {
+                    eprintln!("Failed to send to channel")
+                }
+                Err(TrySendError::Closed(val)) => {
+                    eprintln!("Channel Closed :/");
+                }
+            }
+        }
+
+        EventType::FileClose => {
+            let event = unsafe { ptr::read(ptr as *const RawFileCloseEvent) };
+            let len = event
+                .header
+                .comm
+                .iter()
+                .position(|&s| s == 0)
+                .unwrap_or(event.header.comm.len());
+
+            let path_len = event
+                .path
+                .iter()
+                .position(|&x| x == 0)
+                .unwrap_or(event.path.len());
+
+            match producer.try_send(file_event!(
+                FileClose,
+                FileCloseEvent,
+                convert_header(event.header),
+                String::from_utf8_lossy(&event.path[..path_len]).into_owned()
+            )) {
+                Ok(()) => {}
+                Err(TrySendError::Full(val)) => {
+                    eprintln!("Failed to send to channel")
+                }
+                Err(TrySendError::Closed(val)) => {
+                    eprintln!("Channel Closed :/");
+                }
+            }
         }
 
         _ => {}

@@ -593,7 +593,11 @@ pub fn try_flip_close(ctx: FEntryContext) -> Result<i32, i32> {
         let dentry: *const dentry = (*f_path).dentry;
         let name_ptr = (*dentry).__bindgen_anon_1.d_name.name;
 
-        bpf_probe_read_user_str_bytes(name_ptr as *const _, &mut path);
+        bpf_d_path(
+            f_path as *mut _,
+            path.as_mut_ptr() as *mut i8,
+            path.len() as u32,
+        );
 
         events.write(RawFileCloseEvent {
             header: build_event_header(EventType::FileClose),

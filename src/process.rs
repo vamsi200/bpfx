@@ -1,9 +1,7 @@
 #![allow(unused)]
-use std::ops::{BitOr, BitOrAssign};
-
-use futures::Stream;
-
 use crate::events::EventHeader;
+use futures::Stream;
+use std::ops::{BitOr, BitOrAssign};
 
 /// Emitted after the kernel successfully executes a new program image for a process.
 /// Generated from the `sched_process_exec` tracepoint.
@@ -90,4 +88,18 @@ impl Default for ProcessFilter {
             event_type: ProcessEventMask::ALL,
         }
     }
+}
+
+impl ProcessFilter {
+    pub const START: Self = Self {
+        event_type: ProcessEventMask::START,
+    };
+
+    pub const EXIT: Self = Self {
+        event_type: ProcessEventMask::EXIT,
+    };
+
+    pub const ALL: Self = Self {
+        event_type: ProcessEventMask::ALL,
+    };
 }

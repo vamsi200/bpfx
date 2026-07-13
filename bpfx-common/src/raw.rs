@@ -1,5 +1,7 @@
 #![no_std]
 #![allow(unused)]
+
+use core::ops::{BitOr, BitOrAssign};
 pub const TASK_COMM_LEN: usize = 16;
 pub const DNS_NAME_MAX: usize = 256;
 
@@ -9,11 +11,11 @@ pub enum EventType {
     Connect = 1,
     Accept = 2,
     Close = 3,
-    Dns = 4,
-    ProcessStart = 5,
+    ProcessStart = 4,
+    ProcessFork = 5,
     ProcessExit = 6,
     FileOpen = 7,
-    FileDelete = 8,
+    FileRead = 8,
     FileClose = 9,
 }
 
@@ -24,12 +26,10 @@ impl TryFrom<u8> for EventType {
             1 => Ok(Self::Connect),
             2 => Ok(Self::Accept),
             3 => Ok(Self::Close),
-            4 => Ok(Self::Dns),
-            5 => Ok(Self::ProcessStart),
-            6 => Ok(Self::ProcessExit),
-            7 => Ok(Self::FileOpen),
-            8 => Ok(Self::FileDelete),
-            9 => Ok(Self::FileClose),
+            4 => Ok(Self::ProcessStart),
+            5 => Ok(Self::ProcessExit),
+            6 => Ok(Self::FileOpen),
+            7 => Ok(Self::FileClose),
             _ => Err(()),
         }
     }
@@ -90,53 +90,6 @@ pub struct PendingConnect {
     pub dst_addr: [u8; 16],
 }
 
-// #[repr(C)]
-// #[derive(Clone, Copy, Debug)]
-// pub struct RawConnectEvent {
-//     pub header: RawEventHeader,
-//     pub family: u16,
-// }
-
-// #[repr(C)]
-// #[derive(Debug, Clone, Copy)]
-// pub struct RawAcceptEvent {
-//     pub header: RawEventHeader,
-//
-//     pub protocol: u8,
-//     pub family: u8,
-//
-//     pub local_addr: [u8; 16],
-//     pub remote_addr: [u8; 16],
-//
-//     pub local_port: u16,
-//     pub remote_port: u16,
-// }
-//
-// #[repr(C)]
-// #[derive(Debug, Clone, Copy)]
-// pub struct RawCloseEvent {
-//     pub header: RawEventHeader,
-//
-//     pub protocol: u8,
-//     pub family: u8,
-//
-//     pub src_addr: [u8; 16],
-//     pub dst_addr: [u8; 16],
-//
-//     pub src_port: u16,
-//     pub dst_port: u16,
-// }
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct RawDnsEvent {
-    pub header: RawEventHeader,
-
-    pub query_type: u16,
-
-    pub query: [u8; DNS_NAME_MAX],
-}
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RawProcessStartEvent {
@@ -155,9 +108,7 @@ pub struct RawProcessExitEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct RawFileOpenEvent {
     pub header: RawEventHeader,
-
     pub flags: u32,
-
     pub path: [u8; 256],
 }
 
@@ -175,3 +126,31 @@ pub struct RawFileCloseEvent {
     pub header: RawEventHeader,
     pub path: [u8; 256],
 }
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawProcessForkEvent {
+    pub parent: RawEventHeader,
+    pub child_pid: u32,
+    // pub child_tid: u32, I think child_tid won't add much information at fork
+    pub child_comm: [u8; TASK_COMM_LEN],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawFileReadEvent {
+    pub header: RawEventHeader,
+    pub filename: [u8; 256],
+}
+
+#[cfg(feature = "user")]
+use aya::Pod;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FileModeFilter {
+    pub file_types: u16,
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for FileModeFilter {}

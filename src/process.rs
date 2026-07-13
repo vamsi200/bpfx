@@ -16,11 +16,17 @@ pub struct ProcessStartEvent {
 /// Emitted when a process exits.
 /// Generated from `do_group_exit()`.
 /// The `exit_code` contains the raw kernel exit status.
-#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct ProcessExitEvent {
     pub header: EventHeader,
     pub exit_code: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessForkEvent {
+    pub parent: EventHeader,
+    pub child_pid: u32,
+    pub child_comm: String,
 }
 
 impl ProcessExitEvent {
@@ -32,6 +38,7 @@ impl ProcessExitEvent {
 #[derive(Debug)]
 pub enum ProcessEvent {
     Start(ProcessStartEvent),
+    Fork(ProcessForkEvent),
     Exit(ProcessExitEvent),
 }
 
@@ -55,9 +62,10 @@ pub struct ProcessEventMask(u8);
 
 impl ProcessEventMask {
     pub const START: Self = Self(1 << 0);
-    pub const EXIT: Self = Self(1 << 1);
+    pub const FORK: Self = Self(1 << 1);
+    pub const EXIT: Self = Self(1 << 2);
 
-    pub const ALL: Self = Self(Self::START.0 | Self::EXIT.0);
+    pub const ALL: Self = Self(Self::START.0 | Self::FORK.0 | Self::EXIT.0);
 
     pub fn contains(&self, other: &Self) -> bool {
         self.0 & other.0 == other.0
@@ -93,6 +101,10 @@ impl Default for ProcessFilter {
 impl ProcessFilter {
     pub const START: Self = Self {
         event_type: ProcessEventMask::START,
+    };
+
+    pub const FORK: Self = Self {
+        event_type: ProcessEventMask::FORK,
     };
 
     pub const EXIT: Self = Self {

@@ -1,6 +1,6 @@
 #![allow(unused)]
 use bpfx::convert::Bpfx;
-use bpfx::file::{FileEventMask, FileFilter};
+use bpfx::file::{FileEventMask, FileFilter, UserFileFilter};
 use bpfx::network::NetworkFilter;
 use bpfx::process::{self, ProcessFilter};
 use bpfx::{
@@ -22,7 +22,12 @@ async fn main() -> anyhow::Result<()> {
     //     event_type: FileEventMask::CLOSE,
     // };
 
-    let mut exec = bpfx.poll_file(FileFilter::CLOSE)?;
+    let filter = FileFilter {
+        event_type: FileEventMask::READ,
+        file_mode: Some(UserFileFilter::FILE_SOCK),
+    };
+
+    let mut exec = bpfx.poll_file(filter)?;
 
     bpfx.run();
 

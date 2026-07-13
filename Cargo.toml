@@ -9,7 +9,7 @@ aya-ebpf = "0.1.1"
 aya-ebpf-macros = "0.1.2"
 aya-log-ebpf = "0.1.0"
 aya = "0.13.1"
-bpfx-common = {path = "./bpfx-common/"}
+bpfx-common = {path = "./bpfx-common/", features = ["user"]}
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "signal", "full"] }
 env_logger = "0.11.11"
 aya-log = "0.2.1"

@@ -19,7 +19,7 @@ use aya_ebpf::helpers::{
 };
 use aya_ebpf::macros::{lsm, tracepoint};
 use aya_ebpf::maps::ring_buf::RingBufEntry;
-use aya_ebpf::maps::{Array, RingBuf};
+use aya_ebpf::maps::{Array, HashMap, RingBuf};
 use aya_ebpf::programs::{FEntryContext, LsmContext, TracePointContext};
 use aya_ebpf::programs::{FExitContext, RetProbeContext};
 use aya_ebpf::programs::{fentry, tracepoint};
@@ -28,8 +28,8 @@ use aya_ebpf_macros::{fentry, map};
 use aya_ebpf_macros::{fexit, kretprobe};
 use aya_log_ebpf::info;
 use bpfx_common::raw::{
-    EventType, PendingConnect, RawEventHeader, RawFileCloseEvent, RawFileOpenEvent,
-    RawProcessExitEvent, RawProcessStartEvent,
+    EventType, FileModeFilter, PendingConnect, RawEventHeader, RawFileCloseEvent, RawFileOpenEvent,
+    RawFileReadEvent, RawProcessExitEvent, RawProcessForkEvent, RawProcessStartEvent,
 };
 use bpfx_common::raw::{IpVersion, RawProtocol};
 use core::ffi::c_int;
@@ -41,6 +41,9 @@ const AF_INET6: u16 = 10;
 
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(4 * 1024 * 1024, 0);
+
+#[map]
+static CONFIG: HashMap<u32, FileModeFilter> = HashMap::with_max_entries(1, 0);
 
 pub struct SockAddrIn {
     pub sin_family: u16,
@@ -451,7 +454,6 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<i32, i32> {
         };
 
         let offset = (data_loc & 0xffff) as usize;
-        let len = (data_loc >> 16) as usize;
         let p = (ctx.as_ptr() as *const u8).add(offset);
 
         let mut filename = [0u8; 256];
@@ -590,8 +592,8 @@ pub fn try_flip_close(ctx: FEntryContext) -> Result<i32, i32> {
 
         let mut path = [0u8; 256];
         let f_path: *const path = &(*file).__bindgen_anon_1.f_path;
-        let dentry: *const dentry = (*f_path).dentry;
-        let name_ptr = (*dentry).__bindgen_anon_1.d_name.name;
+        // let dentry: *const dentry = (*f_path).dentry;
+        // let name_ptr = (*dentry).__bindgen_anon_1.d_name.name;
 
         bpf_d_path(
             f_path as *mut _,
@@ -602,6 +604,138 @@ pub fn try_flip_close(ctx: FEntryContext) -> Result<i32, i32> {
         events.write(RawFileCloseEvent {
             header: build_event_header(EventType::FileClose),
             path,
+        });
+
+        events.submit(0);
+    }
+
+    Ok(0)
+}
+
+#[tracepoint]
+pub fn sched_process_fork(ctx: TracePointContext) -> i32 {
+    match unsafe { try_sched_process_fork(ctx) } {
+        Ok(e) => e,
+        Err(_) => 0,
+    }
+}
+
+fn try_sched_process_fork(ctx: TracePointContext) -> Result<i32, i32> {
+    unsafe {
+        let mut events = match EVENTS.reserve::<RawProcessForkEvent>(0) {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        let data_loc: u32 = match ctx.read_at(16) {
+            Ok(e) => e,
+            Err(_) => {
+                events.discard(0);
+                return Ok(0);
+            }
+        };
+
+        let child_pid: u32 = match ctx.read_at(20) {
+            Ok(v) => v,
+            Err(_) => {
+                events.discard(0);
+                return Ok(0);
+            }
+        };
+
+        let offset = (data_loc & 0xffff) as usize;
+        let ptr = (ctx.as_ptr() as *const u8).add(offset);
+
+        let mut child_comm = [0u8; TASK_COMM_LEN];
+        bpf_probe_read_kernel_str(
+            child_comm.as_mut_ptr() as *mut _,
+            child_comm.len() as u32,
+            ptr as *const _,
+        );
+
+        events.write(RawProcessForkEvent {
+            parent: build_event_header(EventType::ProcessFork),
+            child_pid,
+            child_comm,
+        });
+
+        events.submit(0);
+    }
+
+    Ok(0)
+}
+
+#[fexit]
+pub fn vfs_read(ctx: FExitContext) -> i32 {
+    match unsafe { try_vfs_read(ctx) } {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+const S_IFMT: u16 = 0o170000;
+const S_IFIFO: u16 = 0o010000;
+const S_IFCHR: u16 = 0o020000;
+const S_IFDIR: u16 = 0o040000;
+const S_IFBLK: u16 = 0o060000;
+const S_IFREG: u16 = 0o100000;
+const S_IFLNK: u16 = 0o120000;
+const S_IFSOCK: u16 = 0o140000;
+
+const FILE_REG: u16 = 1 << 0;
+const FILE_DIR: u16 = 1 << 1;
+const FILE_CHR: u16 = 1 << 2;
+const FILE_BLK: u16 = 1 << 3;
+const FILE_FIFO: u16 = 1 << 4;
+const FILE_LNK: u16 = 1 << 5;
+const FILE_SOCK: u16 = 1 << 6;
+
+fn try_vfs_read(ctx: FExitContext) -> Result<i32, i32> {
+    unsafe {
+        let mut events = match EVENTS.reserve::<RawFileReadEvent>(0) {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        let file: *const file = ctx.arg(0);
+
+        let dentry: &*mut dentry = &(*file).__bindgen_anon_1.f_path.dentry;
+        let s = (**dentry).__bindgen_anon_1.d_name.name;
+        let mut filename = [0u8; 256];
+
+        bpf_probe_read_kernel_str(
+            filename.as_mut_ptr() as *mut _,
+            filename.len() as u32,
+            s as *const _,
+        );
+
+        let config = match CONFIG.get(&0) {
+            Some(v) => v,
+            None => {
+                events.discard(0);
+                return Ok(0); //NOTE: or maybe use some default??
+            }
+        };
+
+        let ty = match (*(*file).f_inode).i_mode & S_IFMT {
+            S_IFREG => FILE_REG,
+            S_IFDIR => FILE_DIR,
+            S_IFCHR => FILE_CHR,
+            S_IFBLK => FILE_BLK,
+            S_IFIFO => FILE_FIFO,
+            S_IFLNK => FILE_LNK,
+            S_IFSOCK => FILE_SOCK,
+            _ => 0,
+        };
+
+        if (config.file_types & ty) == 0 {
+            events.discard(0);
+            return Ok(0);
+        }
+
+        events.write(RawFileReadEvent {
+            header: build_event_header(EventType::FileRead),
+            filename,
         });
 
         events.submit(0);

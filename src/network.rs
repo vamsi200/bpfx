@@ -147,6 +147,23 @@ impl Default for NetworkFilter {
     }
 }
 
+impl NetworkFilter {
+    pub const ALL: Self = Self {
+        protocols: ProtocolMask::ALL,
+        events: EventMask::ALL,
+    };
+
+    pub const TCP: Self = Self {
+        protocols: ProtocolMask::TCP,
+        events: EventMask::ALL,
+    };
+
+    pub const UDP: Self = Self {
+        protocols: ProtocolMask::UDP,
+        events: EventMask::ALL,
+    };
+}
+
 /// Emitted after the kernel completes processing a successful connect() call.
 /// Generated from `tcp_v4_connect()` and `tcp_v6_connect()` fpr TCP.
 /// Generated from `udp_connect()` and `udpv6_connect()` fpr TCP.

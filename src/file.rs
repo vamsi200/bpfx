@@ -1,6 +1,7 @@
 #![allow(unused)]
 use std::ops::{BitOr, BitOrAssign};
 
+use bpfx_common::raw::FileModeFilter;
 use futures::Stream;
 
 use crate::events::EventHeader;
@@ -27,8 +28,15 @@ pub struct FileCloseEvent {
 }
 
 #[derive(Debug, Clone)]
+pub struct FileReadEvent {
+    pub header: EventHeader,
+    pub filename: String,
+}
+
+#[derive(Debug, Clone)]
 pub enum FileEvent {
     FileOpen(FileOpenEvent),
+    FileRead(FileReadEvent),
     FileClose(FileCloseEvent),
 }
 
@@ -53,8 +61,9 @@ pub struct FileEventMask(u8);
 impl FileEventMask {
     pub const OPEN: Self = Self(1 << 0);
     pub const CLOSE: Self = Self(1 << 1);
+    pub const READ: Self = Self(1 << 2);
 
-    pub const ALL: Self = Self(Self::OPEN.0 | Self::CLOSE.0);
+    pub const ALL: Self = Self(Self::OPEN.0 | Self::CLOSE.0 | Self::READ.0);
 
     pub fn contains(&self, other: &Self) -> bool {
         self.0 & other.0 == other.0
@@ -77,12 +86,14 @@ impl BitOrAssign for FileEventMask {
 #[derive(Debug)]
 pub struct FileFilter {
     pub event_type: FileEventMask,
+    pub file_mode: Option<UserFileFilter>,
 }
 
 impl Default for FileFilter {
     fn default() -> Self {
         Self {
             event_type: FileEventMask::ALL,
+            file_mode: Some(UserFileFilter::default()),
         }
     }
 }
@@ -90,19 +101,72 @@ impl Default for FileFilter {
 impl FileFilter {
     pub const OPEN: Self = Self {
         event_type: FileEventMask::OPEN,
+        file_mode: None,
     };
 
     pub const CLOSE: Self = Self {
         event_type: FileEventMask::CLOSE,
+        file_mode: None,
+    };
+
+    pub const READ: Self = Self {
+        event_type: FileEventMask::READ,
+        file_mode: None,
     };
 
     pub const ALL: Self = Self {
         event_type: FileEventMask::ALL,
+        file_mode: Some(UserFileFilter::FILE_REG),
     };
 }
 
-// impl From<FileEventMask> for FileFilter {
-//     fn from(value: FileEventMask) -> Self {
-//         Self { event_type: value }
-//     }
-// }
+#[derive(Debug, Clone)]
+pub struct UserFileFilter(pub FileModeFilter);
+
+impl UserFileFilter {
+    pub const FILE_REG: Self = Self(FileModeFilter { file_types: 1 << 0 });
+    pub const FILE_DIR: Self = Self(FileModeFilter { file_types: 1 << 1 });
+    pub const FILE_CHR: Self = Self(FileModeFilter { file_types: 1 << 2 });
+    pub const FILE_BLK: Self = Self(FileModeFilter { file_types: 1 << 3 });
+    pub const FILE_FIFO: Self = Self(FileModeFilter { file_types: 1 << 4 });
+    pub const FILE_LNK: Self = Self(FileModeFilter { file_types: 1 << 5 });
+    pub const FILE_SOCK: Self = Self(FileModeFilter { file_types: 1 << 6 });
+
+    pub const ALL: Self = Self(FileModeFilter {
+        file_types: Self::FILE_REG.0.file_types
+            | Self::FILE_DIR.0.file_types
+            | Self::FILE_CHR.0.file_types
+            | Self::FILE_BLK.0.file_types
+            | Self::FILE_FIFO.0.file_types
+            | Self::FILE_LNK.0.file_types
+            | Self::FILE_SOCK.0.file_types,
+    });
+}
+
+impl Default for UserFileFilter {
+    fn default() -> Self {
+        Self::FILE_REG
+    }
+}
+
+impl BitOr for UserFileFilter {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(FileModeFilter {
+            file_types: self.0.file_types | rhs.0.file_types,
+        })
+    }
+}
+
+impl BitOrAssign for UserFileFilter {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0.file_types |= rhs.0.file_types;
+    }
+}
+
+impl From<UserFileFilter> for FileModeFilter {
+    fn from(value: UserFileFilter) -> Self {
+        value.0
+    }
+}

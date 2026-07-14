@@ -17,6 +17,9 @@ pub enum EventType {
     FileOpen = 7,
     FileRead = 8,
     FileClose = 9,
+    FileWrite = 10,
+    FileDelete = 11,
+    FileRename = 12,
 }
 
 impl TryFrom<u8> for EventType {
@@ -108,8 +111,8 @@ pub struct RawProcessExitEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct RawFileOpenEvent {
     pub header: RawEventHeader,
-    pub flags: u32,
-    pub path: [u8; 256],
+    pub filename: [u8; 256],
+    pub file_mode: FileModeFilter,
 }
 
 // #[repr(C)]
@@ -124,7 +127,8 @@ pub struct RawFileOpenEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct RawFileCloseEvent {
     pub header: RawEventHeader,
-    pub path: [u8; 256],
+    pub filename: [u8; 256],
+    pub file_mode: FileModeFilter,
 }
 
 #[repr(C)]
@@ -136,11 +140,13 @@ pub struct RawProcessForkEvent {
     pub child_comm: [u8; TASK_COMM_LEN],
 }
 
+// should you use something else instead of vfs_read??
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RawFileReadEvent {
     pub header: RawEventHeader,
     pub filename: [u8; 256],
+    pub file_mode: FileModeFilter,
 }
 
 #[cfg(feature = "user")]
@@ -154,3 +160,28 @@ pub struct FileModeFilter {
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for FileModeFilter {}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawFileWriteEvent {
+    pub header: RawEventHeader,
+    pub filename: [u8; 256],
+    pub file_mode: FileModeFilter,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawFileDeleteEvent {
+    pub header: RawEventHeader,
+    pub filename: [u8; 256],
+    pub file_mode: FileModeFilter,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawFileRenameEvent {
+    pub header: RawEventHeader,
+    pub old_filename: [u8; 256],
+    pub new_filename: [u8; 256],
+    pub file_mode: FileModeFilter,
+}

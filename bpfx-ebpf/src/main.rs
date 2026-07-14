@@ -5,7 +5,7 @@
 
 pub mod bindings;
 use crate::bindings::tcp_ca_event::CA_EVENT_ECN_IS_CE;
-use crate::bindings::{dentry, file, in6_addr, path, sockaddr};
+use crate::bindings::{dentry, file, in6_addr, inode, path, renamedata, sockaddr, user_namespace};
 use crate::bindings::{sock, socket, task_struct};
 use aya_ebpf::bindings::bpf_core_relo_kind::BPF_CORE_FIELD_BYTE_OFFSET;
 use aya_ebpf::cty::c_char;
@@ -19,7 +19,7 @@ use aya_ebpf::helpers::{
 };
 use aya_ebpf::macros::{lsm, tracepoint};
 use aya_ebpf::maps::ring_buf::RingBufEntry;
-use aya_ebpf::maps::{Array, HashMap, RingBuf};
+use aya_ebpf::maps::{Array, HashMap, PerCpuArray, RingBuf};
 use aya_ebpf::programs::{FEntryContext, LsmContext, TracePointContext};
 use aya_ebpf::programs::{FExitContext, RetProbeContext};
 use aya_ebpf::programs::{fentry, tracepoint};
@@ -28,8 +28,9 @@ use aya_ebpf_macros::{fentry, map};
 use aya_ebpf_macros::{fexit, kretprobe};
 use aya_log_ebpf::info;
 use bpfx_common::raw::{
-    EventType, FileModeFilter, PendingConnect, RawEventHeader, RawFileCloseEvent, RawFileOpenEvent,
-    RawFileReadEvent, RawProcessExitEvent, RawProcessForkEvent, RawProcessStartEvent,
+    EventType, FileModeFilter, PendingConnect, RawEventHeader, RawFileCloseEvent,
+    RawFileDeleteEvent, RawFileOpenEvent, RawFileReadEvent, RawFileRenameEvent, RawFileWriteEvent,
+    RawProcessExitEvent, RawProcessForkEvent, RawProcessStartEvent,
 };
 use bpfx_common::raw::{IpVersion, RawProtocol};
 use core::ffi::c_int;
@@ -44,6 +45,9 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(4 * 1024 * 1024, 0);
 
 #[map]
 static CONFIG: HashMap<u32, FileModeFilter> = HashMap::with_max_entries(1, 0);
+
+#[map]
+static TEMP: PerCpuArray<RawFileRenameEvent> = PerCpuArray::with_max_entries(1, 0);
 
 pub struct SockAddrIn {
     pub sin_family: u16,
@@ -513,58 +517,55 @@ fn try_sys_connect_exit(ctx: TracePointContext) -> Result<i32, i32> {
     unsafe { Ok(ctx.read_at(16).unwrap_or(-1)) }
 }
 
-#[tracepoint]
-fn sys_enter_openat(ctx: TracePointContext) -> i32 {
-    match unsafe { try_sys_enter_openat(ctx) } {
+#[fexit]
+fn vfs_open(ctx: FExitContext) -> i32 {
+    match unsafe { try_vfs_open(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
 }
 
-fn try_sys_enter_openat(ctx: TracePointContext) -> Result<i32, i32> {
+fn try_vfs_open(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
-        let mut event: RingBufEntry<RawFileOpenEvent> = match EVENTS.reserve::<RawFileOpenEvent>(0)
-        {
-            Some(s) => s,
+        let mut event = match EVENTS.reserve::<RawFileOpenEvent>(0) {
+            Some(e) => e,
             None => return Ok(0),
         };
 
-        let dfd: i32 = match ctx.read_at(16) {
-            Ok(fd) => fd,
-            Err(_) => {
-                event.discard(0);
-                return Ok(0);
-            }
-        };
+        let file: *const file = ctx.arg(1);
 
-        let file_name_ptr: u64 = match ctx.read_at(24) {
-            Ok(fname) => fname,
-            Err(_) => {
-                event.discard(0);
-                return Ok(0);
-            }
-        };
+        if file.is_null() {
+            event.discard(0);
+            return Ok(0);
+        }
 
-        let mut path = [0u8; 256];
+        let output = capture_file(file);
 
-        bpf_probe_read_user_str_bytes(file_name_ptr as *const _, &mut path);
+        if !output.0 {
+            event.discard(0);
+            return Ok(0);
+        }
 
-        let flags: u32 = match ctx.read_at(32) {
-            Ok(fl) => fl,
-            Err(_) => {
-                event.discard(0);
-                return Ok(0);
-            }
-        };
+        let dentry = (*file).__bindgen_anon_1.f_path.dentry;
+        let name = (*dentry).__bindgen_anon_1.d_name.name;
+
+        let mut filename = [0u8; 256];
+
+        bpf_probe_read_kernel_str(
+            filename.as_mut_ptr() as *mut _,
+            filename.len() as u32,
+            name as *const _,
+        );
 
         event.write(RawFileOpenEvent {
             header: build_event_header(EventType::FileOpen),
-            flags,
-            path,
+            filename,
+            file_mode: output.1,
         });
 
         event.submit(0);
     }
+
     Ok(0)
 }
 
@@ -585,25 +586,42 @@ pub fn try_flip_close(ctx: FEntryContext) -> Result<i32, i32> {
 
         let file: *const file = ctx.arg(0);
 
+        let output = capture_file(file);
+
+        if !output.0 {
+            events.discard(0);
+            return Ok(0);
+        }
+
         if file.is_null() {
             events.discard(0);
             return Ok(0);
         }
 
-        let mut path = [0u8; 256];
-        let f_path: *const path = &(*file).__bindgen_anon_1.f_path;
-        // let dentry: *const dentry = (*f_path).dentry;
-        // let name_ptr = (*dentry).__bindgen_anon_1.d_name.name;
+        // let mut path = [0u8; 256];
+        // let f_path: *const path = &(*file).__bindgen_anon_1.f_path;
+        //
+        // bpf_d_path(
+        //     f_path as *mut _,
+        //     path.as_mut_ptr() as *mut i8,
+        //     path.len() as u32,
+        // );
 
-        bpf_d_path(
-            f_path as *mut _,
-            path.as_mut_ptr() as *mut i8,
-            path.len() as u32,
+        let dentry = (*file).__bindgen_anon_1.f_path.dentry;
+        let name = (*dentry).__bindgen_anon_1.d_name.name;
+
+        let mut filename = [0u8; 256];
+
+        bpf_probe_read_kernel_str(
+            filename.as_mut_ptr() as *mut _,
+            filename.len() as u32,
+            name as *const _,
         );
 
         events.write(RawFileCloseEvent {
             header: build_event_header(EventType::FileClose),
-            path,
+            filename,
+            file_mode: output.1,
         });
 
         events.submit(0);
@@ -690,31 +708,14 @@ const FILE_FIFO: u16 = 1 << 4;
 const FILE_LNK: u16 = 1 << 5;
 const FILE_SOCK: u16 = 1 << 6;
 
-fn try_vfs_read(ctx: FExitContext) -> Result<i32, i32> {
+#[inline(always)]
+fn capture_file(file: *const file) -> (bool, FileModeFilter) {
     unsafe {
-        let mut events = match EVENTS.reserve::<RawFileReadEvent>(0) {
-            Some(s) => s,
-            None => return Ok(0),
-        };
-
-        let file: *const file = ctx.arg(0);
-
-        let dentry: &*mut dentry = &(*file).__bindgen_anon_1.f_path.dentry;
-        let s = (**dentry).__bindgen_anon_1.d_name.name;
-        let mut filename = [0u8; 256];
-
-        bpf_probe_read_kernel_str(
-            filename.as_mut_ptr() as *mut _,
-            filename.len() as u32,
-            s as *const _,
-        );
+        let file_mode = FileModeFilter { file_types: 0 };
 
         let config = match CONFIG.get(&0) {
             Some(v) => v,
-            None => {
-                events.discard(0);
-                return Ok(0); //NOTE: or maybe use some default??
-            }
+            None => return (false, file_mode),
         };
 
         let ty = match (*(*file).f_inode).i_mode & S_IFMT {
@@ -728,19 +729,231 @@ fn try_vfs_read(ctx: FExitContext) -> Result<i32, i32> {
             _ => 0,
         };
 
-        if (config.file_types & ty) == 0 {
+        (
+            (config.file_types & ty) != 0,
+            FileModeFilter { file_types: ty },
+        )
+    }
+}
+
+fn try_vfs_read(ctx: FExitContext) -> Result<i32, i32> {
+    unsafe {
+        let mut events = match EVENTS.reserve::<RawFileReadEvent>(0) {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        let file: *const file = ctx.arg(0);
+        if file.is_null() {
             events.discard(0);
             return Ok(0);
         }
 
+        let output = capture_file(file);
+        if !output.0 {
+            events.discard(0);
+            return Ok(0);
+        }
+
+        let mut filename = [0u8; 256];
+
+        let dentry = (*file).__bindgen_anon_1.f_path.dentry;
+        let name = (*dentry).__bindgen_anon_1.d_name.name;
+
+        bpf_probe_read_kernel_str(
+            filename.as_mut_ptr() as *mut _,
+            filename.len() as u32,
+            name as *const _,
+        );
         events.write(RawFileReadEvent {
             header: build_event_header(EventType::FileRead),
             filename,
+            file_mode: output.1,
         });
 
         events.submit(0);
     }
 
+    Ok(0)
+}
+
+#[fexit]
+pub fn vfs_write(ctx: FExitContext) -> i32 {
+    match unsafe { try_vfs_write(ctx) } {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_vfs_write(ctx: FExitContext) -> Result<i32, i32> {
+    unsafe {
+        let mut events = match EVENTS.reserve::<RawFileWriteEvent>(0) {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        let file: *const file = ctx.arg(0);
+
+        if file.is_null() {
+            events.discard(0);
+            return Ok(0);
+        }
+
+        let output = capture_file(file);
+        if !output.0 {
+            events.discard(0);
+            return Ok(0);
+        }
+
+        let mut filename = [0u8; 256];
+
+        let dentry = (*file).__bindgen_anon_1.f_path.dentry;
+        let name = (*dentry).__bindgen_anon_1.d_name.name;
+
+        bpf_probe_read_kernel_str(
+            filename.as_mut_ptr() as *mut _,
+            filename.len() as u32,
+            name as *const _,
+        );
+
+        events.write(RawFileWriteEvent {
+            header: build_event_header(EventType::FileWrite),
+            filename,
+            file_mode: output.1,
+        });
+
+        events.submit(0);
+    }
+    Ok(0)
+}
+
+#[inline(always)]
+fn capture_inode(inode: *const inode) -> (bool, FileModeFilter) {
+    unsafe {
+        let file_mode = FileModeFilter { file_types: 0 };
+        let config = match CONFIG.get(&0) {
+            Some(v) => v,
+            None => return (false, file_mode),
+        };
+
+        let ty = match (*inode).i_mode & S_IFMT {
+            S_IFREG => FILE_REG,
+            S_IFDIR => FILE_DIR,
+            S_IFCHR => FILE_CHR,
+            S_IFBLK => FILE_BLK,
+            S_IFIFO => FILE_FIFO,
+            S_IFLNK => FILE_LNK,
+            S_IFSOCK => FILE_SOCK,
+            _ => 0,
+        };
+
+        (
+            (config.file_types & ty) != 0,
+            FileModeFilter { file_types: ty },
+        )
+    }
+}
+
+#[fentry]
+pub fn vfs_unlink(ctx: FEntryContext) -> i32 {
+    match unsafe { try_vfs_unlink(ctx) } {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_vfs_unlink(ctx: FEntryContext) -> Result<i32, i32> {
+    unsafe {
+        let mut events = match EVENTS.reserve::<RawFileDeleteEvent>(0) {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        let dentry: *const dentry = ctx.arg(2);
+        let inode = (*dentry).d_inode;
+
+        let output = capture_inode(inode);
+        if !output.0 {
+            events.discard(0);
+            return Ok(0);
+        }
+
+        let name = (*dentry).__bindgen_anon_1.d_name.name;
+        let mut filename = [0u8; 256];
+        bpf_probe_read_kernel_str(
+            filename.as_mut_ptr() as *mut _,
+            filename.len() as u32,
+            name as *const _,
+        );
+
+        events.write(RawFileDeleteEvent {
+            header: build_event_header(EventType::FileDelete),
+            filename,
+            file_mode: output.1,
+        });
+
+        events.submit(0);
+    }
+
+    Ok(0)
+}
+
+#[fentry]
+pub fn vfs_rename(ctx: FEntryContext) -> i32 {
+    match unsafe { try_vfs_rename(ctx) } {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_vfs_rename(ctx: FEntryContext) -> Result<i32, i32> {
+    unsafe {
+        let renamedata: *const renamedata = ctx.arg(0);
+        let old_dentry = (*renamedata).old_dentry;
+        let new_dentry = (*renamedata).new_dentry;
+
+        let old_inode = (*old_dentry).d_inode;
+        let new_inode = (*new_dentry).d_inode;
+
+        let output = capture_inode(old_inode);
+
+        if !output.0 {
+            info!(&ctx, "discarding..");
+            return Ok(0);
+        }
+
+        let old_filename = (*old_dentry).__bindgen_anon_1.d_name.name;
+        let new_filename = (*new_dentry).__bindgen_anon_1.d_name.name;
+
+        let event = match TEMP.get_ptr_mut(0) {
+            Some(ptr) => &mut *ptr,
+            None => return Ok(0),
+        };
+
+        event.header = build_event_header(EventType::FileRename);
+        event.file_mode = output.1;
+
+        bpf_probe_read_kernel_str(
+            event.old_filename.as_mut_ptr() as *mut _,
+            event.old_filename.len() as u32,
+            old_filename as *const _,
+        );
+
+        bpf_probe_read_kernel_str(
+            event.new_filename.as_mut_ptr() as *mut _,
+            event.new_filename.len() as u32,
+            new_filename as *const _,
+        );
+
+        let mut events = match EVENTS.reserve::<RawFileRenameEvent>(0) {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        events.write(*event);
+
+        events.submit(0);
+    }
     Ok(0)
 }
 

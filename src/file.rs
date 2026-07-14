@@ -1,10 +1,41 @@
 #![allow(unused)]
+#![allow(non_snake_case)]
+use core::fmt;
 use std::ops::{BitOr, BitOrAssign};
 
 use bpfx_common::raw::FileModeFilter;
 use futures::Stream;
 
 use crate::events::EventHeader;
+
+#[derive(Debug, Clone, Copy)]
+pub enum FileType {
+    Regular,
+    Directory,
+    CharDevice,
+    BlockDevice,
+    Fifo,
+    Symlink,
+    Socket,
+    Unknown,
+}
+
+impl From<FileModeFilter> for FileType {
+    fn from(mode: FileModeFilter) -> Self {
+        const S_IFMT: u16 = 0o170000;
+
+        match mode.file_types & S_IFMT {
+            S_IFREG => Self::Regular,
+            S_IFDIR => Self::Directory,
+            S_IFCHR => Self::CharDevice,
+            S_IFBLK => Self::BlockDevice,
+            S_IFIFO => Self::Fifo,
+            S_IFLNK => Self::Symlink,
+            S_IFSOCK => Self::Socket,
+            _ => Self::Unknown,
+        }
+    }
+}
 
 /// Emitted when a process attempts to open a file.
 /// Generated from the `sys_enter_openat` tracepoint.
@@ -13,8 +44,8 @@ use crate::events::EventHeader;
 #[derive(Debug, Clone)]
 pub struct FileOpenEvent {
     pub header: EventHeader,
-    pub flags: u32,
-    pub path: String,
+    pub filename: String,
+    pub file_type: FileType,
 }
 
 /// Emitted when the kernel closes an open file.
@@ -24,13 +55,37 @@ pub struct FileOpenEvent {
 #[derive(Debug, Clone)]
 pub struct FileCloseEvent {
     pub header: EventHeader,
-    pub path: String,
+    pub filename: String,
+    pub file_type: FileType,
 }
 
 #[derive(Debug, Clone)]
 pub struct FileReadEvent {
     pub header: EventHeader,
     pub filename: String,
+    pub file_type: FileType,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileWriteEvent {
+    pub header: EventHeader,
+    pub filename: String,
+    pub file_type: FileType,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileDeleteEvent {
+    pub header: EventHeader,
+    pub filename: String,
+    pub file_type: FileType,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileRenameEvent {
+    pub header: EventHeader,
+    pub old_filename: String,
+    pub new_filename: String,
+    pub file_type: FileType,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +93,9 @@ pub enum FileEvent {
     FileOpen(FileOpenEvent),
     FileRead(FileReadEvent),
     FileClose(FileCloseEvent),
+    FileWrite(FileWriteEvent),
+    FileDelete(FileDeleteEvent),
+    FileRename(FileRenameEvent),
 }
 
 pub struct PollFile {
@@ -62,8 +120,18 @@ impl FileEventMask {
     pub const OPEN: Self = Self(1 << 0);
     pub const CLOSE: Self = Self(1 << 1);
     pub const READ: Self = Self(1 << 2);
+    pub const WRITE: Self = Self(1 << 3);
+    pub const DELETE: Self = Self(1 << 4);
+    pub const RENAME: Self = Self(1 << 5);
 
-    pub const ALL: Self = Self(Self::OPEN.0 | Self::CLOSE.0 | Self::READ.0);
+    pub const ALL: Self = Self(
+        Self::OPEN.0
+            | Self::CLOSE.0
+            | Self::READ.0
+            | Self::WRITE.0
+            | Self::DELETE.0
+            | Self::RENAME.0,
+    );
 
     pub fn contains(&self, other: &Self) -> bool {
         self.0 & other.0 == other.0
@@ -86,14 +154,14 @@ impl BitOrAssign for FileEventMask {
 #[derive(Debug)]
 pub struct FileFilter {
     pub event_type: FileEventMask,
-    pub file_mode: Option<UserFileFilter>,
+    pub file_mode: UserFileFilter,
 }
 
 impl Default for FileFilter {
     fn default() -> Self {
         Self {
             event_type: FileEventMask::ALL,
-            file_mode: Some(UserFileFilter::default()),
+            file_mode: UserFileFilter::default(),
         }
     }
 }
@@ -101,22 +169,37 @@ impl Default for FileFilter {
 impl FileFilter {
     pub const OPEN: Self = Self {
         event_type: FileEventMask::OPEN,
-        file_mode: None,
+        file_mode: UserFileFilter::FILE_REG,
     };
 
     pub const CLOSE: Self = Self {
         event_type: FileEventMask::CLOSE,
-        file_mode: None,
+        file_mode: UserFileFilter::FILE_REG,
     };
 
     pub const READ: Self = Self {
         event_type: FileEventMask::READ,
-        file_mode: None,
+        file_mode: UserFileFilter::FILE_REG,
+    };
+
+    pub const WRITE: Self = Self {
+        event_type: FileEventMask::WRITE,
+        file_mode: UserFileFilter::FILE_REG,
+    };
+
+    pub const DELETE: Self = Self {
+        event_type: FileEventMask::DELETE,
+        file_mode: UserFileFilter::FILE_REG,
+    };
+
+    pub const RENAME: Self = Self {
+        event_type: FileEventMask::RENAME,
+        file_mode: UserFileFilter::FILE_REG,
     };
 
     pub const ALL: Self = Self {
         event_type: FileEventMask::ALL,
-        file_mode: Some(UserFileFilter::FILE_REG),
+        file_mode: UserFileFilter::FILE_REG,
     };
 }
 

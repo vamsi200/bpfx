@@ -166,7 +166,7 @@ impl NetworkFilter {
 
 /// Emitted after the kernel completes processing a successful connect() call.
 /// Generated from `tcp_v4_connect()` and `tcp_v6_connect()` fpr TCP.
-/// Generated from `udp_connect()` and `udpv6_connect()` fpr TCP.
+/// Generated from `udp_connect()` and `udpv6_connect()` for UDP.
 #[derive(Debug, Clone)]
 pub struct ConnectEvent {
     pub header: EventHeader,
@@ -189,6 +189,20 @@ pub struct AcceptEvent {
 /// `udp_destroy_sock()` for UDP sockets.
 #[derive(Debug, Clone)]
 pub struct CloseEvent {
+    pub header: EventHeader,
+    pub protocol: Protocol,
+    pub endpoints: SocketEndpoints,
+}
+
+#[derive(Debug, Clone)]
+pub struct BindEvent {
+    pub header: EventHeader,
+    pub protocol: Protocol,
+    pub endpoints: SocketEndpoints,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListenEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
     pub endpoints: SocketEndpoints,

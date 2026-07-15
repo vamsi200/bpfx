@@ -109,8 +109,11 @@ impl EventMask {
     pub const CONNECT: Self = Self(1 << 0);
     pub const ACCEPT: Self = Self(1 << 1);
     pub const CLOSE: Self = Self(1 << 2);
+    pub const BIND: Self = Self(1 << 3);
+    pub const LISTEN: Self = Self(1 << 4);
 
-    pub const ALL: Self = Self(Self::CONNECT.0 | Self::ACCEPT.0 | Self::CLOSE.0);
+    pub const ALL: Self =
+        Self(Self::CONNECT.0 | Self::ACCEPT.0 | Self::CLOSE.0 | Self::BIND.0 | Self::LISTEN.0);
 
     pub fn contains(&self, other: &Self) -> bool {
         self.0 & other.0 == other.0
@@ -214,6 +217,8 @@ pub enum NetworkEvent {
     Connect(ConnectEvent),
     Accept(AcceptEvent),
     Close(CloseEvent),
+    Bind(BindEvent),
+    Listen(ListenEvent),
 }
 
 impl NetworkEvent {
@@ -222,6 +227,9 @@ impl NetworkEvent {
             Self::Connect(e) => e.protocol,
             Self::Accept(e) => e.protocol,
             Self::Close(e) => e.protocol,
+            Self::Bind(e) => e.protocol,
+            Self::Bind(e) => e.protocol,
+            Self::Listen(e) => e.protocol,
         }
     }
 
@@ -238,6 +246,8 @@ impl NetworkEvent {
             Self::Connect(e) => &e.header,
             Self::Accept(e) => &e.header,
             Self::Close(e) => &e.header,
+            Self::Bind(e) => &e.header,
+            Self::Listen(e) => &e.header,
         }
     }
 
@@ -246,6 +256,8 @@ impl NetworkEvent {
             Self::Connect(e) => &e.endpoints,
             Self::Accept(e) => &e.endpoints,
             Self::Close(e) => &e.endpoints,
+            Self::Bind(e) => &e.endpoints,
+            Self::Listen(e) => &e.endpoints,
         }
     }
 }

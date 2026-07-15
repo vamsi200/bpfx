@@ -20,6 +20,10 @@ pub enum EventType {
     FileWrite = 10,
     FileDelete = 11,
     FileRename = 12,
+    Bind = 13,
+    Listen = 14,
+    MemoryMap = 15,
+    MemoryUnMap = 16,
 }
 
 impl TryFrom<u8> for EventType {
@@ -184,4 +188,22 @@ pub struct RawFileRenameEvent {
     pub old_filename: [u8; 256],
     pub new_filename: [u8; 256],
     pub file_mode: FileModeFilter,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawMemoryMapEvent {
+    pub header: RawEventHeader,
+    pub address: u64,
+    pub length: u64,
+    pub protection: u32,
+    pub flags: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawMemoryUnmapEvent {
+    pub header: RawEventHeader,
+    pub address: u64,
+    pub length: u64,
 }

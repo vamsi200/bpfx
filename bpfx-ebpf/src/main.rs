@@ -30,7 +30,8 @@ use aya_log_ebpf::info;
 use bpfx_common::raw::{
     EventType, FileModeFilter, PendingConnect, RawEventHeader, RawFileCloseEvent,
     RawFileDeleteEvent, RawFileOpenEvent, RawFileReadEvent, RawFileRenameEvent, RawFileWriteEvent,
-    RawProcessExitEvent, RawProcessForkEvent, RawProcessStartEvent,
+    RawMemoryMapEvent, RawMemoryUnmapEvent, RawProcessExitEvent, RawProcessForkEvent,
+    RawProcessStartEvent,
 };
 use bpfx_common::raw::{IpVersion, RawProtocol};
 use core::ffi::c_int;
@@ -165,35 +166,29 @@ fn sock_num(sock: *const sock) -> u16 {
     }
 }
 
-trait SockProvider {
-    unsafe fn sock(&self) -> *const sock;
-}
-
-impl SockProvider for FExitContext {
-    unsafe fn sock(&self) -> *const sock {
-        unsafe { self.arg(0) }
-    }
-}
-
-impl SockProvider for RetProbeContext {
-    unsafe fn sock(&self) -> *const sock {
-        unsafe { self.ret().unwrap_or(core::ptr::null()) }
-    }
-}
+// trait SockProvider {
+//     unsafe fn sock(&self) -> *const sock;
+// }
+//
+// impl SockProvider for FExitContext {
+//     unsafe fn sock(&self) -> *const sock {
+//         unsafe { self.arg(0) }
+//     }
+// }
+//
+// impl SockProvider for RetProbeContext {
+//     unsafe fn sock(&self) -> *const sock {
+//         unsafe { self.ret().unwrap_or(core::ptr::null()) }
+//     }
+// }
 
 #[inline(always)]
-fn emit_v4<C: SockProvider>(ctx: C, protocol: u8, event_type: EventType) -> Result<i32, i32> {
+fn emit_v4(sock: *const sock, protocol: u8, event_type: EventType) -> Result<i32, i32> {
     unsafe {
         let mut event = match EVENTS.reserve::<PendingConnect>(0) {
             Some(e) => e,
             None => return Ok(0),
         };
-
-        let sock = ctx.sock();
-        if sock.is_null() {
-            event.discard(0);
-            return Ok(0);
-        }
 
         let tid = bpf_get_current_pid_tgid() as u32;
 
@@ -219,18 +214,12 @@ fn emit_v4<C: SockProvider>(ctx: C, protocol: u8, event_type: EventType) -> Resu
 }
 
 #[inline(always)]
-fn emit_v6<C: SockProvider>(ctx: C, protocol: u8, event_type: EventType) -> Result<i32, i32> {
+fn emit_v6(sock: *const sock, protocol: u8, event_type: EventType) -> Result<i32, i32> {
     unsafe {
         let mut event = match EVENTS.reserve::<PendingConnect>(0) {
             Some(e) => e,
             None => return Ok(0),
         };
-
-        let sock = ctx.sock();
-        if sock.is_null() {
-            event.discard(0);
-            return Ok(0);
-        }
 
         let tid = bpf_get_current_pid_tgid() as u32;
 
@@ -280,7 +269,8 @@ pub fn tcp_v4_connect(ctx: FExitContext) -> i32 {
 
 fn try_tcp_v4_connect(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
-        emit_v4(ctx, 1, EventType::Connect);
+        let sock: *const sock = ctx.arg(0);
+        emit_v4(sock, 1, EventType::Connect);
     }
     Ok(0)
 }
@@ -316,11 +306,9 @@ fn try_inet_csk_accept_impl(ctx: RetProbeContext) -> Result<i32, i32> {
             }
         };
 
-        info!(&ctx, "Family - {}", family);
-
         match family {
-            AF_INET => emit_v4(ctx, 1, EventType::Accept)?,
-            AF_INET6 => emit_v6(ctx, 1, EventType::Accept)?,
+            AF_INET => emit_v4(sock, 1, EventType::Accept)?,
+            AF_INET6 => emit_v6(sock, 1, EventType::Accept)?,
             _ => {
                 return Ok(0);
             }
@@ -349,8 +337,8 @@ fn try_tcp_close(ctx: FExitContext) -> Result<i32, i32> {
         };
 
         match family {
-            AF_INET => emit_v4(ctx, 1, EventType::Close)?,
-            AF_INET6 => emit_v6(ctx, 1, EventType::Close)?,
+            AF_INET => emit_v4(sock, 1, EventType::Close)?,
+            AF_INET6 => emit_v6(sock, 1, EventType::Close)?,
             _ => return Ok(0),
         };
     }
@@ -376,8 +364,8 @@ fn try_udp_destroy_sock(ctx: FExitContext) -> Result<i32, i32> {
         };
 
         match family {
-            AF_INET => emit_v4(ctx, 2, EventType::Close)?,
-            AF_INET6 => emit_v6(ctx, 2, EventType::Close)?,
+            AF_INET => emit_v4(sock, 2, EventType::Close)?,
+            AF_INET6 => emit_v6(sock, 2, EventType::Close)?,
             _ => return Ok(0),
         };
     }
@@ -394,7 +382,10 @@ pub fn tcp_v6_connect(ctx: FExitContext) -> i32 {
 }
 
 fn try_tcp_v6_connect(ctx: FExitContext) -> Result<i32, i32> {
-    unsafe { emit_v6(ctx, 1, EventType::Connect) }
+    unsafe {
+        let sock: *const sock = ctx.arg(0);
+        emit_v6(sock, 1, EventType::Connect)
+    }
 }
 
 #[inline(always)]
@@ -417,7 +408,8 @@ pub fn udp_connect(ctx: FExitContext) -> i32 {
 
 fn try_udp_connect(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
-        emit_v4(ctx, 2, EventType::Connect);
+        let sock: *const sock = ctx.arg(0);
+        emit_v4(sock, 2, EventType::Connect);
     }
     Ok(0)
 }
@@ -431,7 +423,10 @@ pub fn udpv6_connect(ctx: FExitContext) -> i32 {
 }
 
 fn try_udpv6_connect(ctx: FExitContext) -> Result<i32, i32> {
-    unsafe { emit_v6(ctx, 2, EventType::Connect) }
+    unsafe {
+        let sock: *const sock = ctx.arg(0);
+        emit_v6(sock, 2, EventType::Connect)
+    }
 }
 
 #[tracepoint]
@@ -957,8 +952,134 @@ fn try_vfs_rename(ctx: FEntryContext) -> Result<i32, i32> {
     Ok(0)
 }
 
+#[fexit]
+pub fn inet_bind(ctx: FExitContext) -> i32 {
+    match unsafe { try_inet_bind(ctx) } {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_inet_bind(ctx: FExitContext) -> Result<i32, i32> {
+    unsafe {
+        let socket: *const socket = ctx.arg(0);
+        let sock = (*socket).sk;
+
+        if sock.is_null() || socket.is_null() {
+            return Ok(0);
+        }
+
+        let family = match bpf_probe_read_kernel::<u16>(&(*sock).__sk_common.skc_family) {
+            Ok(val) => val,
+            Err(e) => {
+                return Ok(0);
+            }
+        };
+
+        match family {
+            AF_INET => emit_v4(sock, 1, EventType::Bind),
+            AF_INET6 => emit_v6(sock, 1, EventType::Bind),
+            _ => {
+                return Ok(0);
+            }
+        };
+    }
+    Ok(0)
+}
+
+#[fexit]
+pub fn inet_listen(ctx: FExitContext) -> i32 {
+    match unsafe { try_inet_listen(ctx) } {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_inet_listen(ctx: FExitContext) -> Result<i32, i32> {
+    unsafe {
+        let socket: *const socket = ctx.arg(0);
+        let sock = (*socket).sk;
+
+        if sock.is_null() || socket.is_null() {
+            return Ok(0);
+        }
+
+        let family = match bpf_probe_read_kernel::<u16>(&(*sock).__sk_common.skc_family) {
+            Ok(val) => val,
+            Err(e) => {
+                return Ok(0);
+            }
+        };
+
+        match family {
+            AF_INET => emit_v4(sock, 1, EventType::Listen),
+            AF_INET6 => emit_v6(sock, 1, EventType::Listen),
+            _ => {
+                return Ok(0);
+            }
+        };
+    }
+    Ok(0)
+}
+
+#[fexit]
+pub fn vm_mmap_pgoff(ctx: FExitContext) -> i32 {
+    match unsafe { try_vm_mmap_pgoff(ctx) } {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_vm_mmap_pgoff(ctx: FExitContext) -> Result<i32, i32> {
+    unsafe {
+        let mut events = match EVENTS.reserve::<RawMemoryMapEvent>(0) {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        events.write(RawMemoryMapEvent {
+            header: build_event_header(EventType::MemoryMap),
+            address: ctx.arg(1),
+            length: ctx.arg(2),
+            protection: ctx.arg(3),
+            flags: ctx.arg(4),
+        });
+
+        events.submit(0);
+    }
+
+    Ok(0)
+}
+
+#[fexit]
+pub fn __vm_munmap(ctx: FExitContext) -> i32 {
+    match unsafe { try_vm_munmap(ctx) } {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_vm_munmap(ctx: FExitContext) -> Result<i32, i32> {
+    unsafe {
+        let mut events = match EVENTS.reserve::<RawMemoryUnmapEvent>(0) {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        events.write(RawMemoryUnmapEvent {
+            header: build_event_header(EventType::MemoryUnMap),
+            address: ctx.arg(0),
+            length: ctx.arg(1),
+        });
+
+        events.submit(0);
+    }
+
+    Ok(0)
+}
+
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(_: &PanicInfo) -> ! {
+fn panic_handler(_: &PanicInfo) -> ! {
     loop {}
 }

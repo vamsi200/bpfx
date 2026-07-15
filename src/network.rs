@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use crate::{convert::convert_network_events, events::EventHeader};
+use crate::events::EventHeader;
 use futures::{Stream, StreamExt};
 use std::{
     env::JoinPathsError,
@@ -9,25 +9,6 @@ use std::{
     pin::Pin,
     sync::mpsc,
 };
-
-// expectation:
-// while let Some(event) = monitor.next().await {
-//     match event {
-//         NetworkEvent::Connect(e) => {
-//             println!(
-//                 "{} ({}) connected to {}:{}",
-//                 e.header.comm,
-//                 e.header.pid,
-//                 e.dst_ip,
-//                 e.dst_port
-//             );
-//         }
-//
-//         NetworkEvent::Accept(e) => {}
-//
-//         NetworkEvent::Close(e) => {}
-//     }
-// }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -59,20 +40,6 @@ impl Stream for PollNetwork {
         pn.rx.poll_recv(cx)
     }
 }
-
-// impl PollNetwork {
-//     pub fn new() -> anyhow::Result<Self> {
-//         Self::with_filter(NetworkFilter::default())
-//     }
-//
-//     pub fn with_filter(filter: NetworkFilter) -> anyhow::Result<Self> {
-//         let (tx, mut rx) = tokio::sync::mpsc::channel::<NetworkEvent>(1024);
-//         tokio::spawn(async move {
-//             convert_and_push(tx, &filter).await.unwrap();
-//         });
-//         Ok(Self { rx })
-//     }
-// }
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub struct ProtocolMask(u8);
@@ -137,33 +104,33 @@ impl BitOrAssign for EventMask {
 //TODO: Change these names as well
 #[derive(Debug, Clone)]
 pub struct NetworkFilter {
-    pub protocols: ProtocolMask,
-    pub events: EventMask,
+    pub protocol_mask: ProtocolMask,
+    pub event_mask: EventMask,
 }
 
 impl Default for NetworkFilter {
     fn default() -> Self {
         Self {
-            protocols: ProtocolMask::ALL,
-            events: EventMask::ALL,
+            protocol_mask: ProtocolMask::ALL,
+            event_mask: EventMask::ALL,
         }
     }
 }
 
 impl NetworkFilter {
     pub const ALL: Self = Self {
-        protocols: ProtocolMask::ALL,
-        events: EventMask::ALL,
+        protocol_mask: ProtocolMask::ALL,
+        event_mask: EventMask::ALL,
     };
 
     pub const TCP: Self = Self {
-        protocols: ProtocolMask::TCP,
-        events: EventMask::ALL,
+        protocol_mask: ProtocolMask::TCP,
+        event_mask: EventMask::ALL,
     };
 
     pub const UDP: Self = Self {
-        protocols: ProtocolMask::UDP,
-        events: EventMask::ALL,
+        protocol_mask: ProtocolMask::UDP,
+        event_mask: EventMask::ALL,
     };
 }
 
@@ -175,6 +142,7 @@ pub struct ConnectEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
     pub endpoints: SocketEndpoints,
+    pub retval: i32,
 }
 
 /// Emitted after the kernel accepts an incoming TCP connection.
@@ -197,18 +165,28 @@ pub struct CloseEvent {
     pub endpoints: SocketEndpoints,
 }
 
+/// Emitted when the kernel completes binding a socket to a local address.
+/// Generated from the `inet_bind` fexit hook.
+/// This event is emitted immediately after the kernel finishes processing
+/// a socket bind operation.
 #[derive(Debug, Clone)]
 pub struct BindEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
     pub endpoints: SocketEndpoints,
+    pub retval: i32,
 }
 
+/// Emitted when the kernel completes putting a socket into the listening state.
+/// Generated from the `inet_listen` fexit hook.
+/// This event is emitted immediately after the kernel finishes processing
+/// a listen operation.
 #[derive(Debug, Clone)]
 pub struct ListenEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
     pub endpoints: SocketEndpoints,
+    pub retval: i32,
 }
 
 #[non_exhaustive]

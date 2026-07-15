@@ -1,12 +1,14 @@
 #![allow(unused)]
 #![allow(non_snake_case)]
 use core::fmt;
-use std::ops::{BitOr, BitOrAssign};
+use std::{
+    ops::{BitOr, BitOrAssign},
+    time::Duration,
+};
 
+use crate::events::{EventHeader, ProcessId};
 use bpfx_common::raw::FileModeFilter;
 use futures::Stream;
-
-use crate::events::EventHeader;
 
 #[derive(Debug, Clone, Copy)]
 pub enum FileType {
@@ -37,65 +39,167 @@ impl From<FileModeFilter> for FileType {
     }
 }
 
-/// Emitted when a process attempts to open a file.
-/// Generated from the `sys_enter_openat` tracepoint.
-/// This event is emitted at the entry of the `openat()` system call,
-/// before the kernel resolves the pathname or creates the file descriptor.
+/// Emitted when the kernel completes opening a file.
+/// Generated from the `vfs_open` fexit hook.
+/// This event is emitted immediately after the kernel finishes processing
+/// a file open operation.
 #[derive(Debug, Clone)]
 pub struct FileOpenEvent {
     pub header: EventHeader,
     pub filename: String,
     pub file_type: FileType,
+    pub retval: i32,
 }
 
 /// Emitted when the kernel closes an open file.
-/// Generated from the `filp_close` fentry hook.
-/// This event is emitted immediately before the kernel completes the file
+/// Generated from the `filp_close` fexit hook.
+/// This event is emitted immediately after the kernel completes the file
 /// close operation.
 #[derive(Debug, Clone)]
 pub struct FileCloseEvent {
     pub header: EventHeader,
     pub filename: String,
     pub file_type: FileType,
+    pub retval: i32,
 }
 
+/// Emitted when the kernel completes a file read operation.
+/// Generated from the `vfs_read` fexit hook.
+/// This event is emitted immediately after the kernel finishes processing
+/// a read request for a file.
 #[derive(Debug, Clone)]
 pub struct FileReadEvent {
     pub header: EventHeader,
     pub filename: String,
     pub file_type: FileType,
+    pub retval: isize,
 }
 
+/// Emitted when the kernel completes a file write operation.
+/// Generated from the `vfs_write` fexit hook.
+/// This event is emitted immediately after the kernel finishes processing
+/// a write request for a file.
 #[derive(Debug, Clone)]
 pub struct FileWriteEvent {
     pub header: EventHeader,
     pub filename: String,
     pub file_type: FileType,
+    pub retval: isize,
 }
 
+/// Emitted when the kernel unlinks a file from the filesystem.
+/// Generated from the `vfs_unlink` fexit hook.
+/// This event is emitted immediately after the kernel removes a directory
+/// entry for a file.
 #[derive(Debug, Clone)]
 pub struct FileDeleteEvent {
     pub header: EventHeader,
     pub filename: String,
     pub file_type: FileType,
+    pub retval: i32,
 }
 
+/// Emitted when the kernel renames or moves a file.
+/// Generated from the `vfs_rename` fentry hook.
+/// This event is emitted immediately after the kernel performs the
+/// rename operation.
 #[derive(Debug, Clone)]
 pub struct FileRenameEvent {
     pub header: EventHeader,
     pub old_filename: String,
     pub new_filename: String,
     pub file_type: FileType,
+    pub retval: i32,
 }
 
 #[derive(Debug, Clone)]
 pub enum FileEvent {
-    FileOpen(FileOpenEvent),
-    FileRead(FileReadEvent),
-    FileClose(FileCloseEvent),
-    FileWrite(FileWriteEvent),
-    FileDelete(FileDeleteEvent),
-    FileRename(FileRenameEvent),
+    Open(FileOpenEvent),
+    Read(FileReadEvent),
+    Close(FileCloseEvent),
+    Write(FileWriteEvent),
+    Delete(FileDeleteEvent),
+    Rename(FileRenameEvent),
+}
+
+impl FileEvent {
+    pub fn header(&self) -> &EventHeader {
+        match self {
+            Self::Open(e) => &e.header,
+            Self::Read(e) => &e.header,
+            Self::Close(e) => &e.header,
+            Self::Write(e) => &e.header,
+            Self::Delete(e) => &e.header,
+            Self::Rename(e) => &e.header,
+        }
+    }
+
+    pub fn process(&self) -> ProcessId {
+        self.header().process()
+    }
+
+    pub fn timestamp(&self) -> Duration {
+        self.header().timestamp()
+    }
+
+    pub fn is_kernel_thread(&self) -> bool {
+        self.header().is_kernel_thread()
+    }
+
+    pub fn file_type(&self) -> FileType {
+        match self {
+            Self::Open(e) => e.file_type,
+            Self::Read(e) => e.file_type,
+            Self::Close(e) => e.file_type,
+            Self::Write(e) => e.file_type,
+            Self::Delete(e) => e.file_type,
+            Self::Rename(e) => e.file_type,
+        }
+    }
+
+    pub fn filename(&self) -> Option<&str> {
+        match self {
+            Self::Open(e) => Some(&e.filename),
+            Self::Read(e) => Some(&e.filename),
+            Self::Close(e) => Some(&e.filename),
+            Self::Write(e) => Some(&e.filename),
+            Self::Delete(e) => Some(&e.filename),
+            Self::Rename(_) => None,
+        }
+    }
+
+    pub fn old_filename(&self) -> Option<&str> {
+        match self {
+            Self::Rename(e) => Some(&e.old_filename),
+            _ => None,
+        }
+    }
+
+    pub fn new_filename(&self) -> Option<&str> {
+        match self {
+            Self::Rename(e) => Some(&e.new_filename),
+            _ => None,
+        }
+    }
+
+    pub fn retval(&self) -> isize {
+        match self {
+            Self::Open(e) => e.retval as isize,
+            Self::Read(e) => e.retval,
+            Self::Close(e) => e.retval as isize,
+            Self::Write(e) => e.retval,
+            Self::Delete(e) => e.retval as isize,
+            Self::Rename(e) => e.retval as isize,
+        }
+    }
+
+    pub fn succeeded(&self) -> bool {
+        self.retval() >= 0
+    }
+
+    pub fn failed(&self) -> bool {
+        !self.succeeded()
+    }
 }
 
 pub struct PollFile {

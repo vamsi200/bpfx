@@ -95,6 +95,7 @@ pub struct PendingConnect {
     pub ip_version: IpVersion,
     pub src_addr: [u8; 16],
     pub dst_addr: [u8; 16],
+    pub retval: Option<i32>,
 }
 
 #[repr(C)]
@@ -117,15 +118,8 @@ pub struct RawFileOpenEvent {
     pub header: RawEventHeader,
     pub filename: [u8; 256],
     pub file_mode: FileModeFilter,
+    pub retval: i32,
 }
-
-// #[repr(C)]
-// #[derive(Debug, Clone, Copy)]
-// pub struct rawfiledeleteevent {
-//     pub header: raweventheader,
-
-//     pub path: [u8; 256],
-// }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -133,6 +127,7 @@ pub struct RawFileCloseEvent {
     pub header: RawEventHeader,
     pub filename: [u8; 256],
     pub file_mode: FileModeFilter,
+    pub retval: i32,
 }
 
 #[repr(C)]
@@ -144,13 +139,13 @@ pub struct RawProcessForkEvent {
     pub child_comm: [u8; TASK_COMM_LEN],
 }
 
-// should you use something else instead of vfs_read??
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RawFileReadEvent {
     pub header: RawEventHeader,
     pub filename: [u8; 256],
     pub file_mode: FileModeFilter,
+    pub retval: isize,
 }
 
 #[cfg(feature = "user")]
@@ -171,6 +166,7 @@ pub struct RawFileWriteEvent {
     pub header: RawEventHeader,
     pub filename: [u8; 256],
     pub file_mode: FileModeFilter,
+    pub retval: isize,
 }
 
 #[repr(C)]
@@ -179,6 +175,7 @@ pub struct RawFileDeleteEvent {
     pub header: RawEventHeader,
     pub filename: [u8; 256],
     pub file_mode: FileModeFilter,
+    pub retval: i32,
 }
 
 #[repr(C)]
@@ -188,22 +185,25 @@ pub struct RawFileRenameEvent {
     pub old_filename: [u8; 256],
     pub new_filename: [u8; 256],
     pub file_mode: FileModeFilter,
+    pub retval: i32,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RawMemoryMapEvent {
     pub header: RawEventHeader,
-    pub address: u64,
+    pub requested_address: usize,
     pub length: u64,
     pub protection: u32,
     pub flags: u32,
+    pub mapped_address: usize,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RawMemoryUnmapEvent {
     pub header: RawEventHeader,
-    pub address: u64,
+    pub requested_address: usize,
     pub length: u64,
+    pub mapped_address: usize,
 }

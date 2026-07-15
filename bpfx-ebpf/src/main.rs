@@ -166,24 +166,13 @@ fn sock_num(sock: *const sock) -> u16 {
     }
 }
 
-// trait SockProvider {
-//     unsafe fn sock(&self) -> *const sock;
-// }
-//
-// impl SockProvider for FExitContext {
-//     unsafe fn sock(&self) -> *const sock {
-//         unsafe { self.arg(0) }
-//     }
-// }
-//
-// impl SockProvider for RetProbeContext {
-//     unsafe fn sock(&self) -> *const sock {
-//         unsafe { self.ret().unwrap_or(core::ptr::null()) }
-//     }
-// }
-
 #[inline(always)]
-fn emit_v4(sock: *const sock, protocol: u8, event_type: EventType) -> Result<i32, i32> {
+fn emit_v4(
+    sock: *const sock,
+    retval: Option<i32>,
+    protocol: u8,
+    event_type: EventType,
+) -> Result<i32, i32> {
     unsafe {
         let mut event = match EVENTS.reserve::<PendingConnect>(0) {
             Some(e) => e,
@@ -199,13 +188,14 @@ fn emit_v4(sock: *const sock, protocol: u8, event_type: EventType) -> Result<i32
 
         event.write(PendingConnect {
             header: build_event_header(event_type),
-            protocol: RawProtocol::try_from(protocol).unwrap(),
+            protocol: RawProtocol::try_from(protocol).unwrap(), // unwrap is fine here.
             tid,
             src_port: sock_num(sock),
             dst_port: sock_dport(sock),
             ip_version: IpVersion::V4,
             src_addr,
             dst_addr,
+            retval,
         });
 
         event.submit(0);
@@ -214,7 +204,12 @@ fn emit_v4(sock: *const sock, protocol: u8, event_type: EventType) -> Result<i32
 }
 
 #[inline(always)]
-fn emit_v6(sock: *const sock, protocol: u8, event_type: EventType) -> Result<i32, i32> {
+fn emit_v6(
+    sock: *const sock,
+    retval: Option<i32>,
+    protocol: u8,
+    event_type: EventType,
+) -> Result<i32, i32> {
     unsafe {
         let mut event = match EVENTS.reserve::<PendingConnect>(0) {
             Some(e) => e,
@@ -251,6 +246,7 @@ fn emit_v6(sock: *const sock, protocol: u8, event_type: EventType) -> Result<i32
             ip_version: IpVersion::V6,
             src_addr,
             dst_addr: daddr,
+            retval,
         });
         event.submit(0);
     }
@@ -270,7 +266,10 @@ pub fn tcp_v4_connect(ctx: FExitContext) -> i32 {
 fn try_tcp_v4_connect(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
         let sock: *const sock = ctx.arg(0);
-        emit_v4(sock, 1, EventType::Connect);
+        if sock.is_null() {
+            return Ok(0);
+        }
+        emit_v4(sock, Some(ctx.arg(3)), 1, EventType::Connect);
     }
     Ok(0)
 }
@@ -307,8 +306,8 @@ fn try_inet_csk_accept_impl(ctx: RetProbeContext) -> Result<i32, i32> {
         };
 
         match family {
-            AF_INET => emit_v4(sock, 1, EventType::Accept)?,
-            AF_INET6 => emit_v6(sock, 1, EventType::Accept)?,
+            AF_INET => emit_v4(sock, None, 1, EventType::Accept)?,
+            AF_INET6 => emit_v6(sock, None, 1, EventType::Accept)?,
             _ => {
                 return Ok(0);
             }
@@ -337,8 +336,8 @@ fn try_tcp_close(ctx: FExitContext) -> Result<i32, i32> {
         };
 
         match family {
-            AF_INET => emit_v4(sock, 1, EventType::Close)?,
-            AF_INET6 => emit_v6(sock, 1, EventType::Close)?,
+            AF_INET => emit_v4(sock, None, 1, EventType::Close)?,
+            AF_INET6 => emit_v6(sock, None, 1, EventType::Close)?,
             _ => return Ok(0),
         };
     }
@@ -356,6 +355,9 @@ pub fn udp_destroy_sock(ctx: FExitContext) -> i32 {
 fn try_udp_destroy_sock(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
         let sock: *const sock = unsafe { ctx.arg(0) };
+        if sock.is_null() {
+            return Ok(0);
+        }
         let family = match bpf_probe_read_kernel::<u16>(&(*sock).__sk_common.skc_family) {
             Ok(val) => val,
             Err(e) => {
@@ -364,8 +366,8 @@ fn try_udp_destroy_sock(ctx: FExitContext) -> Result<i32, i32> {
         };
 
         match family {
-            AF_INET => emit_v4(sock, 2, EventType::Close)?,
-            AF_INET6 => emit_v6(sock, 2, EventType::Close)?,
+            AF_INET => emit_v4(sock, None, 2, EventType::Close)?,
+            AF_INET6 => emit_v6(sock, None, 2, EventType::Close)?,
             _ => return Ok(0),
         };
     }
@@ -384,7 +386,10 @@ pub fn tcp_v6_connect(ctx: FExitContext) -> i32 {
 fn try_tcp_v6_connect(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
         let sock: *const sock = ctx.arg(0);
-        emit_v6(sock, 1, EventType::Connect)
+        if sock.is_null() {
+            return Ok(0);
+        }
+        emit_v6(sock, Some(ctx.arg(3)), 1, EventType::Connect)
     }
 }
 
@@ -409,7 +414,10 @@ pub fn udp_connect(ctx: FExitContext) -> i32 {
 fn try_udp_connect(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
         let sock: *const sock = ctx.arg(0);
-        emit_v4(sock, 2, EventType::Connect);
+        if sock.is_null() {
+            return Ok(0);
+        }
+        emit_v4(sock, Some(ctx.arg(3)), 2, EventType::Connect);
     }
     Ok(0)
 }
@@ -425,7 +433,10 @@ pub fn udpv6_connect(ctx: FExitContext) -> i32 {
 fn try_udpv6_connect(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
         let sock: *const sock = ctx.arg(0);
-        emit_v6(sock, 2, EventType::Connect)
+        if sock.is_null() {
+            return Ok(0);
+        }
+        emit_v6(sock, Some(ctx.arg(3)), 2, EventType::Connect)
     }
 }
 
@@ -500,17 +511,17 @@ fn try_do_group_exit(ctx: FEntryContext) -> Result<i32, i32> {
     Ok(0)
 }
 
-#[tracepoint]
-fn sys_connect_exit(ctx: TracePointContext) -> i32 {
-    match unsafe { try_sys_connect_exit(ctx) } {
-        Ok(v) => v,
-        Err(_) => -1,
-    }
-}
-
-fn try_sys_connect_exit(ctx: TracePointContext) -> Result<i32, i32> {
-    unsafe { Ok(ctx.read_at(16).unwrap_or(-1)) }
-}
+// #[tracepoint]
+// fn sys_connect_exit(ctx: TracePointContext) -> i32 {
+//     match unsafe { try_sys_connect_exit(ctx) } {
+//         Ok(v) => v,
+//         Err(_) => -1,
+//     }
+// }
+//
+// fn try_sys_connect_exit(ctx: TracePointContext) -> Result<i32, i32> {
+//     unsafe { Ok(ctx.read_at(16).unwrap_or(-1)) }
+// }
 
 #[fexit]
 fn vfs_open(ctx: FExitContext) -> i32 {
@@ -556,6 +567,7 @@ fn try_vfs_open(ctx: FExitContext) -> Result<i32, i32> {
             header: build_event_header(EventType::FileOpen),
             filename,
             file_mode: output.1,
+            retval: ctx.arg(2),
         });
 
         event.submit(0);
@@ -564,15 +576,15 @@ fn try_vfs_open(ctx: FExitContext) -> Result<i32, i32> {
     Ok(0)
 }
 
-#[fentry]
-pub fn filp_close(ctx: FEntryContext) -> i32 {
+#[fexit]
+pub fn filp_close(ctx: FExitContext) -> i32 {
     match try_flip_close(ctx) {
         Ok(ret) => ret,
         Err(_) => 0,
     }
 }
 
-pub fn try_flip_close(ctx: FEntryContext) -> Result<i32, i32> {
+pub fn try_flip_close(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
         let mut events = match EVENTS.reserve::<RawFileCloseEvent>(0) {
             Some(s) => s,
@@ -593,15 +605,6 @@ pub fn try_flip_close(ctx: FEntryContext) -> Result<i32, i32> {
             return Ok(0);
         }
 
-        // let mut path = [0u8; 256];
-        // let f_path: *const path = &(*file).__bindgen_anon_1.f_path;
-        //
-        // bpf_d_path(
-        //     f_path as *mut _,
-        //     path.as_mut_ptr() as *mut i8,
-        //     path.len() as u32,
-        // );
-
         let dentry = (*file).__bindgen_anon_1.f_path.dentry;
         let name = (*dentry).__bindgen_anon_1.d_name.name;
 
@@ -617,6 +620,7 @@ pub fn try_flip_close(ctx: FEntryContext) -> Result<i32, i32> {
             header: build_event_header(EventType::FileClose),
             filename,
             file_mode: output.1,
+            retval: ctx.arg(2),
         });
 
         events.submit(0);
@@ -764,6 +768,7 @@ fn try_vfs_read(ctx: FExitContext) -> Result<i32, i32> {
             header: build_event_header(EventType::FileRead),
             filename,
             file_mode: output.1,
+            retval: ctx.arg(4),
         });
 
         events.submit(0);
@@ -815,6 +820,7 @@ fn try_vfs_write(ctx: FExitContext) -> Result<i32, i32> {
             header: build_event_header(EventType::FileWrite),
             filename,
             file_mode: output.1,
+            retval: ctx.arg(4),
         });
 
         events.submit(0);
@@ -849,15 +855,15 @@ fn capture_inode(inode: *const inode) -> (bool, FileModeFilter) {
     }
 }
 
-#[fentry]
-pub fn vfs_unlink(ctx: FEntryContext) -> i32 {
+#[fexit]
+pub fn vfs_unlink(ctx: FExitContext) -> i32 {
     match unsafe { try_vfs_unlink(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
 }
 
-fn try_vfs_unlink(ctx: FEntryContext) -> Result<i32, i32> {
+fn try_vfs_unlink(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
         let mut events = match EVENTS.reserve::<RawFileDeleteEvent>(0) {
             Some(s) => s,
@@ -885,6 +891,7 @@ fn try_vfs_unlink(ctx: FEntryContext) -> Result<i32, i32> {
             header: build_event_header(EventType::FileDelete),
             filename,
             file_mode: output.1,
+            retval: ctx.arg(4),
         });
 
         events.submit(0);
@@ -893,15 +900,15 @@ fn try_vfs_unlink(ctx: FEntryContext) -> Result<i32, i32> {
     Ok(0)
 }
 
-#[fentry]
-pub fn vfs_rename(ctx: FEntryContext) -> i32 {
+#[fexit]
+pub fn vfs_rename(ctx: FExitContext) -> i32 {
     match unsafe { try_vfs_rename(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
 }
 
-fn try_vfs_rename(ctx: FEntryContext) -> Result<i32, i32> {
+fn try_vfs_rename(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
         let renamedata: *const renamedata = ctx.arg(0);
         let old_dentry = (*renamedata).old_dentry;
@@ -913,7 +920,6 @@ fn try_vfs_rename(ctx: FEntryContext) -> Result<i32, i32> {
         let output = capture_inode(old_inode);
 
         if !output.0 {
-            info!(&ctx, "discarding..");
             return Ok(0);
         }
 
@@ -927,6 +933,7 @@ fn try_vfs_rename(ctx: FEntryContext) -> Result<i32, i32> {
 
         event.header = build_event_header(EventType::FileRename);
         event.file_mode = output.1;
+        event.retval = ctx.arg(1);
 
         bpf_probe_read_kernel_str(
             event.old_filename.as_mut_ptr() as *mut _,
@@ -977,8 +984,8 @@ fn try_inet_bind(ctx: FExitContext) -> Result<i32, i32> {
         };
 
         match family {
-            AF_INET => emit_v4(sock, 1, EventType::Bind),
-            AF_INET6 => emit_v6(sock, 1, EventType::Bind),
+            AF_INET => emit_v4(sock, Some(ctx.arg(3)), 1, EventType::Bind),
+            AF_INET6 => emit_v6(sock, Some(ctx.arg(3)), 1, EventType::Bind),
             _ => {
                 return Ok(0);
             }
@@ -1012,8 +1019,8 @@ fn try_inet_listen(ctx: FExitContext) -> Result<i32, i32> {
         };
 
         match family {
-            AF_INET => emit_v4(sock, 1, EventType::Listen),
-            AF_INET6 => emit_v6(sock, 1, EventType::Listen),
+            AF_INET => emit_v4(sock, Some(ctx.arg(2)), 1, EventType::Listen),
+            AF_INET6 => emit_v6(sock, Some(ctx.arg(2)), 1, EventType::Listen),
             _ => {
                 return Ok(0);
             }
@@ -1039,10 +1046,11 @@ fn try_vm_mmap_pgoff(ctx: FExitContext) -> Result<i32, i32> {
 
         events.write(RawMemoryMapEvent {
             header: build_event_header(EventType::MemoryMap),
-            address: ctx.arg(1),
+            requested_address: ctx.arg(1),
             length: ctx.arg(2),
             protection: ctx.arg(3),
             flags: ctx.arg(4),
+            mapped_address: ctx.arg(6),
         });
 
         events.submit(0);
@@ -1068,8 +1076,9 @@ fn try_vm_munmap(ctx: FExitContext) -> Result<i32, i32> {
 
         events.write(RawMemoryUnmapEvent {
             header: build_event_header(EventType::MemoryUnMap),
-            address: ctx.arg(0),
+            requested_address: ctx.arg(0),
             length: ctx.arg(1),
+            mapped_address: ctx.arg(3),
         });
 
         events.submit(0);

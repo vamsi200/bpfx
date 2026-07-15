@@ -1,7 +1,7 @@
 #![allow(unused)]
 use bpfx::convert::Bpfx;
 use bpfx::file::{FileEvent, FileEventMask, FileFilter, UserFileFilter};
-use bpfx::memory::MemoryFilter;
+use bpfx::memory::{MemoryEvent, MemoryFilter, MemoryMask};
 use bpfx::network::NetworkFilter;
 use bpfx::process::{self, ProcessFilter};
 use bpfx::{
@@ -21,6 +21,15 @@ async fn main() -> anyhow::Result<()> {
     // let mut network = bpfx.poll_network(NetworkFilter::default())?;
     // let filter = FileFilter {
     //     event_type: FileEventMask::CLOSE,
+    //     file_mode: UserFileFilter::default()
+    // };
+
+    let filter = MemoryFilter {
+        mask: MemoryMask::MMAP,
+    };
+
+    // let filter = ProcessFilter {
+    // event_type: ProcessEventMask::default()
     // };
 
     // let filter = NetworkFilter {
@@ -28,12 +37,12 @@ async fn main() -> anyhow::Result<()> {
     //     events: EventMask::LISTEN,
     // };
 
-    let mut exec = bpfx.poll_memory(MemoryFilter::UNMAP)?;
+    let mut exec = bpfx.poll_process(ProcessFilter::ALL)?;
 
     bpfx.run();
 
     while let Some(event) = exec.next().await {
-        println!("{event:#?}");
+        println!("{:?}", event.is_kernel_thread());
     }
 
     Ok(())

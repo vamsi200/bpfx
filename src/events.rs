@@ -1,6 +1,12 @@
 #![allow(unused)]
 
-use std::net::IpAddr;
+use std::{net::IpAddr, time::Duration};
+
+#[derive(Debug)]
+pub struct ProcessId {
+    pub pid: u32,
+    pub tid: u32,
+}
 
 #[derive(Debug, Clone)]
 pub struct EventHeader {
@@ -15,4 +21,21 @@ pub struct EventHeader {
 
     /// Process Name
     pub comm: String,
+}
+
+impl EventHeader {
+    pub fn process(&self) -> ProcessId {
+        ProcessId {
+            pid: self.pid,
+            tid: self.tid,
+        }
+    }
+
+    pub fn is_kernel_thread(&self) -> bool {
+        self.pid == 0
+    }
+
+    pub fn timestamp(&self) -> Duration {
+        Duration::from_nanos(self.timestamp_ns)
+    }
 }

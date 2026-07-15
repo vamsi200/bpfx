@@ -12,13 +12,13 @@ use crate::network::{
 use crate::process::ProcessEvent::*;
 use crate::process::*;
 use crate::process::{
-    self, PollProcess, ProcessEvent, ProcessEventMask, ProcessExitEvent, ProcessFilter,
+    self, PollProcess, ProcessEvent, ProcessExitEvent, ProcessFilter, ProcessMask,
 };
 use crate::{
     events::EventHeader,
     network::{AcceptEvent, CloseEvent, ConnectEvent, NetworkEvent, SocketEndpoints},
 };
-use anyhow::Result;
+use anyhow::{Error, Result};
 use aya::maps::MapData;
 use aya::maps::ring_buf::RingBufItem;
 use aya::programs::TracePoint;
@@ -101,7 +101,7 @@ impl Bpfx {
     pub fn poll_network(&mut self, filter: NetworkFilter) -> anyhow::Result<PollNetwork> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<NetworkEvent>(1024);
         let nr = NetworkRegister { filter, tx };
-        attach_network_probe(&nr.filter, &mut self.bpf, &self.btf);
+        attach_network_probe(&nr.filter, &mut self.bpf, &self.btf)?;
         self.network = Some(nr);
 
         Ok(PollNetwork { rx })
@@ -110,7 +110,7 @@ impl Bpfx {
     pub fn poll_process(&mut self, filter: ProcessFilter) -> anyhow::Result<PollProcess> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ProcessEvent>(1024);
         let pr = ProcessRegister { filter, tx };
-        attach_process_probe(&pr.filter, &mut self.bpf, &self.btf);
+        attach_process_probe(&pr.filter, &mut self.bpf, &self.btf)?;
         self.process = Some(pr);
         Ok(PollProcess { rx })
     }
@@ -118,7 +118,7 @@ impl Bpfx {
     pub fn poll_file(&mut self, filter: FileFilter) -> anyhow::Result<PollFile> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<FileEvent>(1024);
         let fr = FileRegister { filter, tx };
-        attach_file_probe(&fr.filter, &mut self.bpf, &self.btf);
+        attach_file_probe(&fr.filter, &mut self.bpf, &self.btf)?;
         self.file = Some(fr);
 
         Ok(PollFile { rx })
@@ -127,7 +127,7 @@ impl Bpfx {
     pub fn poll_memory(&mut self, filter: MemoryFilter) -> anyhow::Result<PollMem> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<MemoryEvent>(1024);
         let fr = MemRegister { filter, tx };
-        attach_mem_probe(&fr.filter, &mut self.bpf, &self.btf);
+        attach_mem_probe(&fr.filter, &mut self.bpf, &self.btf)?;
         self.mem = Some(fr);
 
         Ok(PollMem { rx })
@@ -209,6 +209,15 @@ fn parse_network_event(event: &PendingConnect) -> (EventHeader, SocketEndpoints)
 }
 
 macro_rules! network_event {
+    ($variant:ident, $ty:ident, $header:expr, $protocol:expr, $endpoints:expr, $retval: expr) => {
+        NetworkEvent::$variant($ty {
+            header: $header,
+            protocol: $protocol,
+            endpoints: $endpoints,
+            retval: $retval,
+        })
+    };
+
     ($variant:ident, $ty:ident, $header:expr, $protocol:expr, $endpoints:expr) => {
         NetworkEvent::$variant($ty {
             header: $header,
@@ -243,41 +252,45 @@ macro_rules! process_event {
 }
 
 macro_rules! file_event {
-    ($variant: ident, $ty: ident, $header: expr, $filename: expr, $file_type: expr) => {
+    ($variant: ident, $ty: ident, $header: expr, $filename: expr, $file_type: expr, $retval: expr) => {
         FileEvent::$variant($ty {
             header: $header,
             filename: $filename,
             file_type: $file_type,
+            retval: $retval,
         })
     };
 
-    ($variant: ident, $ty: ident, $header: expr, $old_filename: expr, $new_filename: expr, $file_type: expr) => {
+    ($variant: ident, $ty: ident, $header: expr, $old_filename: expr, $new_filename: expr, $file_type: expr, $retval: expr) => {
         FileEvent::$variant($ty {
             header: $header,
             old_filename: $old_filename,
             new_filename: $new_filename,
             file_type: $file_type,
+            retval: $retval,
         })
     };
 }
 
 macro_rules! mem_event {
-    ($variant: ident, $ty: ident, $header: expr, $address: expr, $lenght: expr, $protection: expr,
-     $flags: expr) => {
+    ($variant: ident, $ty: ident, $header: expr, $requested_address: expr, $lenght: expr, $protection: expr,
+     $flags: expr, $mapped_address: expr) => {
         MemoryEvent::$variant($ty {
             header: $header,
-            address: $address,
+            requested_address: $requested_address,
             length: $lenght,
             protection: $protection,
             flags: $flags,
+            mapped_address: $mapped_address,
         })
     };
 
-    ($variant: ident, $ty: ident, $header: expr, $address: expr, $length: expr) => {
+    ($variant: ident, $ty: ident, $header: expr, $requested_address: expr, $length: expr, $mapped_address: expr) => {
         MemoryEvent::$variant($ty {
             header: $header,
-            address: $address,
+            requested_address: $requested_address,
             length: $length,
+            mapped_address: $mapped_address,
         })
     };
 }
@@ -303,14 +316,22 @@ fn attach_fexit(
     prog_name: &'static str,
     func_name: &'static str,
 ) -> Result<()> {
-    let prog: &mut FExit = bpf.program_mut(prog_name).unwrap().try_into()?; // dont unwrap here??
+    let prog: &mut FExit = bpf
+        .program_mut(prog_name)
+        .ok_or(Error::msg("Failed to get mut on Program"))?
+        .try_into()?;
+
     prog.load(func_name, btf)?;
     prog.attach()?;
     Ok(())
 }
 
 fn attach_kprobe(bpf: &mut Ebpf, prog_name: &'static str, symbol: &'static str) -> Result<()> {
-    let prog: &mut KProbe = bpf.program_mut(prog_name).unwrap().try_into()?;
+    let prog: &mut KProbe = bpf
+        .program_mut(prog_name)
+        .ok_or(Error::msg("Failed to get mut on Program"))?
+        .try_into()?;
+
     prog.load()?;
     prog.attach(symbol, 0)?;
     Ok(())
@@ -322,7 +343,11 @@ fn attach_fentry(
     prog_name: &'static str,
     symbol: &'static str,
 ) -> Result<()> {
-    let prog: &mut FEntry = bpf.program_mut(prog_name).unwrap().try_into()?;
+    let prog: &mut FEntry = bpf
+        .program_mut(prog_name)
+        .ok_or(Error::msg("Failed to get mut on Program"))?
+        .try_into()?;
+
     prog.load(prog_name, &btf)?;
     prog.attach()?;
     Ok(())
@@ -334,7 +359,11 @@ fn attach_tracepoint(
     category: &'static str,
     tracepoint: &'static str,
 ) -> Result<()> {
-    let prog: &mut TracePoint = bpf.program_mut(prog_name).unwrap().try_into()?;
+    let prog: &mut TracePoint = bpf
+        .program_mut(prog_name)
+        .ok_or(Error::msg("Failed to get mut on Program"))?
+        .try_into()?;
+
     prog.load()?;
     prog.attach(category, tracepoint)?;
     Ok(())
@@ -350,7 +379,8 @@ fn handle_connect(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>)
                 ConnectEvent,
                 header,
                 Protocol::Tcp,
-                endpoints
+                endpoints,
+                event.retval.unwrap() // unwrap is fine here.
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(val)) => {
@@ -368,7 +398,8 @@ fn handle_connect(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>)
                 ConnectEvent,
                 header,
                 Protocol::Udp,
-                endpoints
+                endpoints,
+                event.retval.unwrap()
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(val)) => {
@@ -449,42 +480,56 @@ fn handle_close(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) -
     Ok(())
 }
 
-fn attach_network_probe(filter: &NetworkFilter, bpf: &mut Ebpf, btf: &Btf) {
-    if filter.protocols.contains(&ProtocolMask::TCP) && filter.events.contains(&EventMask::CONNECT)
+fn attach_network_probe(filter: &NetworkFilter, bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
+    if filter.protocol_mask.contains(&ProtocolMask::TCP)
+        && filter.event_mask.contains(&EventMask::CONNECT)
     {
         for probe in TCP_CONNECT {
-            attach_fexit(bpf, &btf, probe.0, probe.1).unwrap();
+            attach_fexit(bpf, &btf, probe.0, probe.1)?;
         }
     }
 
-    if filter.protocols.contains(&ProtocolMask::TCP) && filter.events.contains(&EventMask::ACCEPT) {
+    if filter.protocol_mask.contains(&ProtocolMask::TCP)
+        && filter.event_mask.contains(&EventMask::ACCEPT)
+    {
         for probe in TCP_ACCEPT {
-            attach_kprobe(bpf, probe.0, probe.1).unwrap();
+            attach_kprobe(bpf, probe.0, probe.1)?;
         }
     }
 
-    if filter.protocols.contains(&ProtocolMask::TCP) && filter.events.contains(&EventMask::CLOSE) {
-        attach_fexit(bpf, btf, TCP_CLOSE.0, TCP_CLOSE.1).unwrap();
+    if filter.protocol_mask.contains(&ProtocolMask::TCP)
+        && filter.event_mask.contains(&EventMask::CLOSE)
+    {
+        attach_fexit(bpf, btf, TCP_CLOSE.0, TCP_CLOSE.1)?;
     }
 
-    if filter.protocols.contains(&ProtocolMask::TCP) && filter.events.contains(&EventMask::BIND) {
-        attach_fexit(bpf, &btf, "inet_bind", "inet_bind").unwrap();
+    if filter.protocol_mask.contains(&ProtocolMask::TCP)
+        && filter.event_mask.contains(&EventMask::BIND)
+    {
+        attach_fexit(bpf, &btf, "inet_bind", "inet_bind")?;
     }
 
-    if filter.protocols.contains(&ProtocolMask::TCP) && filter.events.contains(&EventMask::LISTEN) {
-        attach_fexit(bpf, &btf, "inet_listen", "inet_listen").unwrap();
+    if filter.protocol_mask.contains(&ProtocolMask::TCP)
+        && filter.event_mask.contains(&EventMask::LISTEN)
+    {
+        attach_fexit(bpf, &btf, "inet_listen", "inet_listen")?;
     }
 
-    if filter.protocols.contains(&ProtocolMask::UDP) && filter.events.contains(&EventMask::CONNECT)
+    if filter.protocol_mask.contains(&ProtocolMask::UDP)
+        && filter.event_mask.contains(&EventMask::CONNECT)
     {
         for probe in UDP_CONNECT {
-            attach_fexit(bpf, &btf, probe.0, probe.1).unwrap();
+            attach_fexit(bpf, &btf, probe.0, probe.1)?;
         }
     }
 
-    if filter.protocols.contains(&ProtocolMask::UDP) && filter.events.contains(&EventMask::CLOSE) {
-        attach_fexit(bpf, &btf, UDP_CLOSE.0, UDP_CLOSE.1).unwrap();
+    if filter.protocol_mask.contains(&ProtocolMask::UDP)
+        && filter.event_mask.contains(&EventMask::CLOSE)
+    {
+        attach_fexit(bpf, &btf, UDP_CLOSE.0, UDP_CLOSE.1)?;
     }
+
+    Ok(())
 }
 
 // Read and convert the raw event structs to structured and then send to channel..
@@ -505,7 +550,14 @@ pub fn convert_network_events(
         EventType::Bind => {
             let (header, endpoints) = parse_network_event(&event);
             let protocol = crate::network::Protocol::Tcp;
-            match producer.try_send(network_event!(Bind, BindEvent, header, protocol, endpoints)) {
+            match producer.try_send(network_event!(
+                Bind,
+                BindEvent,
+                header,
+                protocol,
+                endpoints,
+                event.retval.unwrap() // unwrap here is fine.
+            )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(val)) => {
                     eprintln!("Failed to send to channel")
@@ -523,7 +575,8 @@ pub fn convert_network_events(
                 ListenEvent,
                 header,
                 protocol,
-                endpoints
+                endpoints,
+                event.retval.unwrap()
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(val)) => {
@@ -541,15 +594,15 @@ pub fn convert_network_events(
 }
 
 fn attach_process_probe(filter: &ProcessFilter, bpf: &mut Ebpf, btf: &Btf) -> anyhow::Result<()> {
-    if filter.event_type.contains(&ProcessEventMask::START) {
+    if filter.mask.contains(&ProcessMask::START) {
         attach_tracepoint(bpf, "sched_process_exec", "sched", "sched_process_exec")?;
     }
 
-    if filter.event_type.contains(&ProcessEventMask::FORK) {
+    if filter.mask.contains(&ProcessMask::FORK) {
         attach_tracepoint(bpf, "sched_process_fork", "sched", "sched_process_fork")?;
     }
 
-    if filter.event_type.contains(&ProcessEventMask::EXIT) {
+    if filter.mask.contains(&ProcessMask::EXIT) {
         attach_fentry(bpf, &btf, "do_group_exit", "do_group_exit")?;
     }
 
@@ -657,46 +710,50 @@ pub fn convert_process_events(
     Ok(())
 }
 
-fn write_to_map(bpf: &mut Ebpf, filter: &FileFilter) {
+fn write_to_map(bpf: &mut Ebpf, filter: &FileFilter) -> Result<()> {
     use aya::maps::HashMap;
 
-    let mut config: HashMap<_, u32, FileModeFilter> =
-        HashMap::try_from(bpf.map_mut("CONFIG").unwrap()).unwrap();
+    let mut config: HashMap<_, u32, FileModeFilter> = HashMap::try_from(
+        bpf.map_mut("CONFIG")
+            .ok_or(Error::msg("Failed to get mut on HashMap"))?,
+    )?;
 
-    config
-        .insert(0, FileModeFilter::from(filter.file_mode.clone()), 0)
-        .unwrap();
+    config.insert(0, FileModeFilter::from(filter.file_mode.clone()), 0)?;
+
+    Ok(())
 }
 
-fn attach_file_probe(filter: &FileFilter, bpf: &mut Ebpf, btf: &Btf) {
+fn attach_file_probe(filter: &FileFilter, bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
     if filter.event_type.contains(&FileEventMask::OPEN) {
-        write_to_map(bpf, filter);
-        attach_fexit(bpf, btf, "vfs_open", "vfs_open").unwrap();
+        write_to_map(bpf, filter)?;
+        attach_fexit(bpf, btf, "vfs_open", "vfs_open")?;
     }
 
     if filter.event_type.contains(&FileEventMask::CLOSE) {
-        write_to_map(bpf, filter);
-        attach_fentry(bpf, btf, "filp_close", "filp_close").unwrap();
+        write_to_map(bpf, filter)?;
+        attach_fentry(bpf, btf, "filp_close", "filp_close")?;
     }
 
     if filter.event_type.contains(&FileEventMask::READ) {
-        attach_fexit(bpf, btf, "vfs_read", "vfs_read").unwrap();
+        attach_fexit(bpf, btf, "vfs_read", "vfs_read")?;
     }
 
     if filter.event_type.contains(&FileEventMask::WRITE) {
-        write_to_map(bpf, filter);
-        attach_fexit(bpf, btf, "vfs_write", "vfs_write").unwrap();
+        write_to_map(bpf, filter)?;
+        attach_fexit(bpf, btf, "vfs_write", "vfs_write")?;
     }
 
     if filter.event_type.contains(&FileEventMask::DELETE) {
-        write_to_map(bpf, filter);
-        attach_fentry(bpf, btf, "vfs_unlink", "vfs_unlink").unwrap();
+        write_to_map(bpf, filter)?;
+        attach_fentry(bpf, btf, "vfs_unlink", "vfs_unlink")?;
     }
 
     if filter.event_type.contains(&FileEventMask::RENAME) {
-        write_to_map(bpf, filter);
-        attach_fentry(bpf, btf, "vfs_rename", "vfs_rename").unwrap();
+        write_to_map(bpf, filter)?;
+        attach_fentry(bpf, btf, "vfs_rename", "vfs_rename")?;
     }
+
+    Ok(())
 }
 
 fn convert_file_events(
@@ -720,11 +777,12 @@ fn convert_file_events(
                 .unwrap_or(event.filename.len());
 
             match producer.try_send(file_event!(
-                FileOpen,
+                Open,
                 FileOpenEvent,
                 convert_header(event.header),
                 String::from_utf8_lossy(&event.filename[..path_len]).into_owned(),
-                FileType::from(event.file_mode)
+                FileType::from(event.file_mode),
+                event.retval
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(val)) => {
@@ -745,11 +803,12 @@ fn convert_file_events(
                 .unwrap_or(event.filename.len());
 
             match producer.try_send(file_event!(
-                FileClose,
+                Close,
                 FileCloseEvent,
                 convert_header(event.header),
                 String::from_utf8_lossy(&event.filename[..path_len]).into_owned(),
-                FileType::from(event.file_mode)
+                FileType::from(event.file_mode),
+                event.retval
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(val)) => {
@@ -770,11 +829,12 @@ fn convert_file_events(
                 .unwrap_or(event.filename.len());
 
             match producer.try_send(file_event!(
-                FileRead,
+                Read,
                 FileReadEvent,
                 convert_header(event.header),
                 String::from_utf8_lossy(&event.filename[..path_len]).into_owned(),
-                FileType::from(event.file_mode)
+                FileType::from(event.file_mode),
+                event.retval
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(val)) => {
@@ -795,11 +855,12 @@ fn convert_file_events(
                 .unwrap_or(event.filename.len());
 
             match producer.try_send(file_event!(
-                FileWrite,
+                Write,
                 FileWriteEvent,
                 convert_header(event.header),
                 String::from_utf8_lossy(&event.filename[..path_len]).into_owned(),
-                FileType::from(event.file_mode)
+                FileType::from(event.file_mode),
+                event.retval
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(val)) => {
@@ -820,11 +881,12 @@ fn convert_file_events(
                 .unwrap_or(event.filename.len());
 
             match producer.try_send(file_event!(
-                FileDelete,
+                Delete,
                 FileDeleteEvent,
                 convert_header(event.header),
                 String::from_utf8_lossy(&event.filename[..path_len]).into_owned(),
-                FileType::from(event.file_mode)
+                FileType::from(event.file_mode),
+                event.retval
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(val)) => {
@@ -851,12 +913,13 @@ fn convert_file_events(
                 .unwrap_or(event.new_filename.len());
 
             match producer.try_send(file_event!(
-                FileRename,
+                Rename,
                 FileRenameEvent,
                 convert_header(event.header),
                 String::from_utf8_lossy(&event.old_filename[..old_path_len]).into_owned(),
                 String::from_utf8_lossy(&event.new_filename[..new_path_len]).into_owned(),
-                FileType::from(event.file_mode)
+                FileType::from(event.file_mode),
+                event.retval
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(val)) => {
@@ -874,14 +937,16 @@ fn convert_file_events(
     Ok(())
 }
 
-fn attach_mem_probe(filter: &MemoryFilter, bpf: &mut Ebpf, btf: &Btf) {
-    if filter.event_type.contains(MemoryMask::MMAP) {
-        attach_fexit(bpf, btf, "vm_mmap_pgoff", "vm_mmap_pgoff").unwrap();
+fn attach_mem_probe(filter: &MemoryFilter, bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
+    if filter.mask.contains(MemoryMask::MMAP) {
+        attach_fexit(bpf, btf, "vm_mmap_pgoff", "vm_mmap_pgoff")?;
     }
 
-    if filter.event_type.contains(MemoryMask::UNMAP) {
-        attach_fexit(bpf, btf, "__vm_munmap", "__vm_munmap").unwrap();
+    if filter.mask.contains(MemoryMask::UNMAP) {
+        attach_fexit(bpf, btf, "__vm_munmap", "__vm_munmap")?;
     }
+
+    Ok(())
 }
 
 fn convert_mem_events(
@@ -901,10 +966,11 @@ fn convert_mem_events(
                 MemoryMap,
                 MemoryMapEvent,
                 convert_header(event.header),
-                event.address,
+                event.requested_address,
                 event.length,
                 event.protection,
-                event.flags
+                event.flags,
+                event.mapped_address
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(val)) => {
@@ -922,8 +988,9 @@ fn convert_mem_events(
                 MemoryUnMap,
                 MemoryUnmapEvent,
                 convert_header(event.header),
-                event.address,
-                event.length
+                event.requested_address,
+                event.length,
+                event.mapped_address
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(val)) => {

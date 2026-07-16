@@ -27,8 +27,11 @@ use aya::{
     maps::RingBuf,
     programs::{FEntry, FExit, KProbe},
 };
+use aya_ebpf::maps::HashMap;
 use aya_log::EbpfLogger;
 use bpfx_common::raw::*;
+use futures::stream::Filter;
+use std::fmt::Debug;
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     ptr,
@@ -481,6 +484,8 @@ fn handle_close(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) -
 }
 
 fn attach_network_probe(filter: &NetworkFilter, bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
+    write_to_fiter_map(&Filters::Network(filter), FilterOwner::Network, bpf)?;
+
     if filter.protocol_mask.contains(&ProtocolMask::TCP)
         && filter.event_mask.contains(&EventMask::CONNECT)
     {
@@ -594,6 +599,8 @@ pub fn convert_network_events(
 }
 
 fn attach_process_probe(filter: &ProcessFilter, bpf: &mut Ebpf, btf: &Btf) -> anyhow::Result<()> {
+    write_to_fiter_map(&Filters::Process(filter), FilterOwner::Process, bpf)?;
+
     if filter.mask.contains(&ProcessMask::START) {
         attach_tracepoint(bpf, "sched_process_exec", "sched", "sched_process_exec")?;
     }
@@ -724,13 +731,14 @@ fn write_to_map(bpf: &mut Ebpf, filter: &FileFilter) -> Result<()> {
 }
 
 fn attach_file_probe(filter: &FileFilter, bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
+    write_to_fiter_map(&Filters::File(filter), FilterOwner::File, bpf)?;
+    write_to_map(bpf, filter)?;
+
     if filter.event_type.contains(&FileEventMask::OPEN) {
-        write_to_map(bpf, filter)?;
         attach_fexit(bpf, btf, "vfs_open", "vfs_open")?;
     }
 
     if filter.event_type.contains(&FileEventMask::CLOSE) {
-        write_to_map(bpf, filter)?;
         attach_fentry(bpf, btf, "filp_close", "filp_close")?;
     }
 
@@ -739,17 +747,14 @@ fn attach_file_probe(filter: &FileFilter, bpf: &mut Ebpf, btf: &Btf) -> Result<(
     }
 
     if filter.event_type.contains(&FileEventMask::WRITE) {
-        write_to_map(bpf, filter)?;
         attach_fexit(bpf, btf, "vfs_write", "vfs_write")?;
     }
 
     if filter.event_type.contains(&FileEventMask::DELETE) {
-        write_to_map(bpf, filter)?;
         attach_fentry(bpf, btf, "vfs_unlink", "vfs_unlink")?;
     }
 
     if filter.event_type.contains(&FileEventMask::RENAME) {
-        write_to_map(bpf, filter)?;
         attach_fentry(bpf, btf, "vfs_rename", "vfs_rename")?;
     }
 
@@ -937,7 +942,35 @@ fn convert_file_events(
     Ok(())
 }
 
+enum Filters<'a> {
+    Memory(&'a MemoryFilter),
+    File(&'a FileFilter),
+    Network(&'a NetworkFilter),
+    Process(&'a ProcessFilter),
+}
+
+fn write_to_fiter_map(filter_type: &Filters, owner: FilterOwner, bpf: &mut Ebpf) -> Result<()> {
+    use aya::maps::HashMap;
+
+    let mut filter: HashMap<_, u32, FilterKey> = HashMap::try_from(
+        bpf.map_mut("FILTER")
+            .ok_or(Error::msg("Failed to get mut on Array Map"))?,
+    )?;
+
+    let filter_type = match filter_type {
+        Filters::Memory(m) => m.filter,
+        Filters::File(f) => f.filter,
+        Filters::Network(n) => n.filter,
+        Filters::Process(p) => p.filter,
+    };
+
+    filter.insert(owner as u32, filter_type, 0)?;
+    Ok(())
+}
+
 fn attach_mem_probe(filter: &MemoryFilter, bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
+    write_to_fiter_map(&Filters::Memory(filter), FilterOwner::Memory, bpf)?;
+
     if filter.mask.contains(MemoryMask::MMAP) {
         attach_fexit(bpf, btf, "vm_mmap_pgoff", "vm_mmap_pgoff")?;
     }

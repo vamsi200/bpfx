@@ -1,6 +1,7 @@
 #![allow(unused)]
 
 use crate::events::EventHeader;
+use bpfx_common::raw::FilterKey;
 use futures::{Stream, StreamExt};
 use std::{
     env::JoinPathsError,
@@ -106,6 +107,7 @@ impl BitOrAssign for EventMask {
 pub struct NetworkFilter {
     pub protocol_mask: ProtocolMask,
     pub event_mask: EventMask,
+    pub filter: FilterKey,
 }
 
 impl Default for NetworkFilter {
@@ -113,6 +115,7 @@ impl Default for NetworkFilter {
         Self {
             protocol_mask: ProtocolMask::ALL,
             event_mask: EventMask::ALL,
+            filter: FilterKey::None,
         }
     }
 }
@@ -121,16 +124,19 @@ impl NetworkFilter {
     pub const ALL: Self = Self {
         protocol_mask: ProtocolMask::ALL,
         event_mask: EventMask::ALL,
+        filter: FilterKey::None,
     };
 
     pub const TCP: Self = Self {
         protocol_mask: ProtocolMask::TCP,
         event_mask: EventMask::ALL,
+        filter: FilterKey::None,
     };
 
     pub const UDP: Self = Self {
         protocol_mask: ProtocolMask::UDP,
         event_mask: EventMask::ALL,
+        filter: FilterKey::None,
     };
 }
 

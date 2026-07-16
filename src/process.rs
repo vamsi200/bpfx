@@ -1,5 +1,6 @@
 #![allow(unused)]
 use crate::events::{EventHeader, ProcessId};
+use bpfx_common::raw::FilterKey;
 use futures::Stream;
 use std::{
     ops::{BitOr, BitOrAssign},
@@ -129,12 +130,14 @@ impl BitOrAssign for ProcessMask {
 #[derive(Debug)]
 pub struct ProcessFilter {
     pub mask: ProcessMask,
+    pub filter: FilterKey,
 }
 
 impl Default for ProcessFilter {
     fn default() -> Self {
         Self {
             mask: ProcessMask::ALL,
+            filter: FilterKey::None,
         }
     }
 }
@@ -142,17 +145,21 @@ impl Default for ProcessFilter {
 impl ProcessFilter {
     pub const START: Self = Self {
         mask: ProcessMask::START,
+        filter: FilterKey::None,
     };
 
     pub const FORK: Self = Self {
         mask: ProcessMask::FORK,
+        filter: FilterKey::None,
     };
 
     pub const EXIT: Self = Self {
         mask: ProcessMask::EXIT,
+        filter: FilterKey::None,
     };
 
     pub const ALL: Self = Self {
         mask: ProcessMask::ALL,
+        filter: FilterKey::None,
     };
 }

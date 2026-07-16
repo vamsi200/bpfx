@@ -28,10 +28,10 @@ use aya_ebpf_macros::{fentry, map};
 use aya_ebpf_macros::{fexit, kretprobe};
 use aya_log_ebpf::info;
 use bpfx_common::raw::{
-    EventType, FileModeFilter, PendingConnect, RawEventHeader, RawFileCloseEvent,
-    RawFileDeleteEvent, RawFileOpenEvent, RawFileReadEvent, RawFileRenameEvent, RawFileWriteEvent,
-    RawMemoryMapEvent, RawMemoryUnmapEvent, RawProcessExitEvent, RawProcessForkEvent,
-    RawProcessStartEvent,
+    EventType, FileModeFilter, FilterKey, FilterOwner, PendingConnect, RawEventHeader,
+    RawFileCloseEvent, RawFileDeleteEvent, RawFileOpenEvent, RawFileReadEvent, RawFileRenameEvent,
+    RawFileWriteEvent, RawMemoryMapEvent, RawMemoryUnmapEvent, RawProcessExitEvent,
+    RawProcessForkEvent, RawProcessStartEvent,
 };
 use bpfx_common::raw::{IpVersion, RawProtocol};
 use core::ffi::c_int;
@@ -49,6 +49,9 @@ static CONFIG: HashMap<u32, FileModeFilter> = HashMap::with_max_entries(1, 0);
 
 #[map]
 static TEMP: PerCpuArray<RawFileRenameEvent> = PerCpuArray::with_max_entries(1, 0);
+
+#[map]
+static FILTER: HashMap<u32, FilterKey> = HashMap::with_max_entries(5, 0);
 
 pub struct SockAddrIn {
     pub sin_family: u16,
@@ -82,7 +85,7 @@ fn collect_process_ctx() -> (u64, u32, u32, u32, u32, u32, [u8; TASK_COMM_LEN]) 
         };
 
         let ppid = if parent_ptr.is_null() {
-            0 // not a good idea
+            0 //WARN:not a good idea
         } else {
             bpf_probe_read_kernel(&(*parent_ptr).tgid).unwrap_or(0) as u32
         };
@@ -179,6 +182,12 @@ fn emit_v4(
             None => return Ok(0),
         };
 
+        let header = build_event_header(event_type);
+        if filter_events(FilterOwner::Network, &header) {
+            event.discard(0);
+            return Ok(0);
+        }
+
         let tid = bpf_get_current_pid_tgid() as u32;
 
         let mut dst_addr = [0u8; 16];
@@ -187,7 +196,7 @@ fn emit_v4(
         src_addr[..4].copy_from_slice(&sock_rcv_saddr(sock).to_ne_bytes());
 
         event.write(PendingConnect {
-            header: build_event_header(event_type),
+            header,
             protocol: RawProtocol::try_from(protocol).unwrap(), // unwrap is fine here.
             tid,
             src_port: sock_num(sock),
@@ -216,6 +225,12 @@ fn emit_v6(
             None => return Ok(0),
         };
 
+        let header = build_event_header(event_type);
+        if filter_events(FilterOwner::Network, &header) {
+            event.discard(0);
+            return Ok(0);
+        }
+
         let tid = bpf_get_current_pid_tgid() as u32;
 
         let daddr = match read_v6_addr(sock, core::ptr::addr_of!((*sock).__sk_common.skc_v6_daddr))
@@ -238,7 +253,7 @@ fn emit_v6(
         };
 
         event.write(PendingConnect {
-            header: build_event_header(event_type),
+            header,
             protocol: RawProtocol::try_from(protocol).unwrap(),
             tid,
             src_port: sock_num(sock),
@@ -455,6 +470,12 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<i32, i32> {
             None => return Ok(0),
         };
 
+        let header = build_event_header(EventType::ProcessStart);
+        if filter_events(FilterOwner::Process, &header) {
+            events.discard(0);
+            return Ok(0);
+        }
+
         let data_loc: u32 = match ctx.read_at(8) {
             Ok(v) => v,
             Err(_) => {
@@ -475,7 +496,7 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<i32, i32> {
         );
 
         events.write(RawProcessStartEvent {
-            header: build_event_header(EventType::ProcessStart),
+            header,
             filename: filename,
         });
 
@@ -500,11 +521,14 @@ fn try_do_group_exit(ctx: FEntryContext) -> Result<i32, i32> {
             None => return Ok(0),
         };
 
+        let header = build_event_header(EventType::ProcessExit);
+        if filter_events(FilterOwner::Process, &header) {
+            events.discard(0);
+            return Ok(0);
+        }
+
         let exit_code: i32 = ctx.arg(0);
-        events.write(RawProcessExitEvent {
-            header: build_event_header(EventType::ProcessExit),
-            exit_code,
-        });
+        events.write(RawProcessExitEvent { header, exit_code });
 
         events.submit(0);
     }
@@ -538,6 +562,13 @@ fn try_vfs_open(ctx: FExitContext) -> Result<i32, i32> {
             None => return Ok(0),
         };
 
+        let header = build_event_header(EventType::FileOpen);
+
+        if filter_events(FilterOwner::File, &header) {
+            event.discard(0);
+            return Ok(0);
+        }
+
         let file: *const file = ctx.arg(1);
 
         if file.is_null() {
@@ -564,7 +595,7 @@ fn try_vfs_open(ctx: FExitContext) -> Result<i32, i32> {
         );
 
         event.write(RawFileOpenEvent {
-            header: build_event_header(EventType::FileOpen),
+            header,
             filename,
             file_mode: output.1,
             retval: ctx.arg(2),
@@ -590,6 +621,13 @@ pub fn try_flip_close(ctx: FExitContext) -> Result<i32, i32> {
             Some(s) => s,
             None => return Ok(0),
         };
+
+        let header = build_event_header(EventType::FileClose);
+
+        if filter_events(FilterOwner::File, &header) {
+            events.discard(0);
+            return Ok(0);
+        }
 
         let file: *const file = ctx.arg(0);
 
@@ -617,7 +655,7 @@ pub fn try_flip_close(ctx: FExitContext) -> Result<i32, i32> {
         );
 
         events.write(RawFileCloseEvent {
-            header: build_event_header(EventType::FileClose),
+            header,
             filename,
             file_mode: output.1,
             retval: ctx.arg(2),
@@ -643,6 +681,12 @@ fn try_sched_process_fork(ctx: TracePointContext) -> Result<i32, i32> {
             Some(s) => s,
             None => return Ok(0),
         };
+
+        let header = build_event_header(EventType::ProcessFork);
+        if filter_events(FilterOwner::Process, &header) {
+            events.discard(0);
+            return Ok(0);
+        }
 
         let data_loc: u32 = match ctx.read_at(16) {
             Ok(e) => e,
@@ -671,7 +715,7 @@ fn try_sched_process_fork(ctx: TracePointContext) -> Result<i32, i32> {
         );
 
         events.write(RawProcessForkEvent {
-            parent: build_event_header(EventType::ProcessFork),
+            parent: header,
             child_pid,
             child_comm,
         });
@@ -742,6 +786,13 @@ fn try_vfs_read(ctx: FExitContext) -> Result<i32, i32> {
             None => return Ok(0),
         };
 
+        let header = build_event_header(EventType::FileRead);
+
+        if filter_events(FilterOwner::File, &header) {
+            events.discard(0);
+            return Ok(0);
+        }
+
         let file: *const file = ctx.arg(0);
         if file.is_null() {
             events.discard(0);
@@ -765,7 +816,7 @@ fn try_vfs_read(ctx: FExitContext) -> Result<i32, i32> {
             name as *const _,
         );
         events.write(RawFileReadEvent {
-            header: build_event_header(EventType::FileRead),
+            header,
             filename,
             file_mode: output.1,
             retval: ctx.arg(4),
@@ -792,6 +843,13 @@ fn try_vfs_write(ctx: FExitContext) -> Result<i32, i32> {
             None => return Ok(0),
         };
 
+        let header = build_event_header(EventType::FileWrite);
+
+        if filter_events(FilterOwner::File, &header) {
+            events.discard(0);
+            return Ok(0);
+        }
+
         let file: *const file = ctx.arg(0);
 
         if file.is_null() {
@@ -817,7 +875,7 @@ fn try_vfs_write(ctx: FExitContext) -> Result<i32, i32> {
         );
 
         events.write(RawFileWriteEvent {
-            header: build_event_header(EventType::FileWrite),
+            header,
             filename,
             file_mode: output.1,
             retval: ctx.arg(4),
@@ -870,6 +928,13 @@ fn try_vfs_unlink(ctx: FExitContext) -> Result<i32, i32> {
             None => return Ok(0),
         };
 
+        let header = build_event_header(EventType::FileDelete);
+
+        if filter_events(FilterOwner::File, &header) {
+            events.discard(0);
+            return Ok(0);
+        }
+
         let dentry: *const dentry = ctx.arg(2);
         let inode = (*dentry).d_inode;
 
@@ -888,7 +953,7 @@ fn try_vfs_unlink(ctx: FExitContext) -> Result<i32, i32> {
         );
 
         events.write(RawFileDeleteEvent {
-            header: build_event_header(EventType::FileDelete),
+            header,
             filename,
             file_mode: output.1,
             retval: ctx.arg(4),
@@ -910,6 +975,12 @@ pub fn vfs_rename(ctx: FExitContext) -> i32 {
 
 fn try_vfs_rename(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
+        let header = build_event_header(EventType::FileRename);
+
+        if filter_events(FilterOwner::File, &header) {
+            return Ok(0);
+        }
+
         let renamedata: *const renamedata = ctx.arg(0);
         let old_dentry = (*renamedata).old_dentry;
         let new_dentry = (*renamedata).new_dentry;
@@ -931,7 +1002,7 @@ fn try_vfs_rename(ctx: FExitContext) -> Result<i32, i32> {
             None => return Ok(0),
         };
 
-        event.header = build_event_header(EventType::FileRename);
+        event.header = header;
         event.file_mode = output.1;
         event.retval = ctx.arg(1);
 
@@ -1029,6 +1100,47 @@ fn try_inet_listen(ctx: FExitContext) -> Result<i32, i32> {
     Ok(0)
 }
 
+fn filter_events(filter_owner: FilterOwner, header: &RawEventHeader) -> bool {
+    unsafe {
+        if let Some(key) = FILTER.get(&(filter_owner as u32)) {
+            match *key {
+                FilterKey::None => {
+                    return false;
+                }
+                FilterKey::Pid(pid) => {
+                    if header.pid != pid {
+                        return true;
+                    }
+                }
+                FilterKey::Tid(tid) => {
+                    if header.tid != tid {
+                        return true;
+                    }
+                }
+                FilterKey::Uid(uid) => {
+                    if header.uid != uid {
+                        return true;
+                    }
+                }
+                FilterKey::Ppid(ppid) => {
+                    if header.ppid != ppid {
+                        return true;
+                    }
+                }
+                FilterKey::Gid(gid) => {
+                    if header.gid != gid {
+                        return true;
+                    }
+                }
+                _ => {
+                    return false;
+                }
+            }
+        }
+        false
+    }
+}
+
 #[fexit]
 pub fn vm_mmap_pgoff(ctx: FExitContext) -> i32 {
     match unsafe { try_vm_mmap_pgoff(ctx) } {
@@ -1044,8 +1156,15 @@ fn try_vm_mmap_pgoff(ctx: FExitContext) -> Result<i32, i32> {
             None => return Ok(0),
         };
 
+        let header = build_event_header(EventType::MemoryMap);
+
+        if filter_events(FilterOwner::Memory, &header) {
+            events.discard(0);
+            return Ok(0);
+        }
+
         events.write(RawMemoryMapEvent {
-            header: build_event_header(EventType::MemoryMap),
+            header,
             requested_address: ctx.arg(1),
             length: ctx.arg(2),
             protection: ctx.arg(3),

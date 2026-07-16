@@ -207,3 +207,26 @@ pub struct RawMemoryUnmapEvent {
     pub length: u64,
     pub mapped_address: usize,
 }
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum FilterKey {
+    None,
+    Pid(u32),
+    Tid(u32),
+    Ppid(u32),
+    Uid(u32),
+    Gid(u32),
+}
+
+#[repr(u32)]
+pub enum FilterOwner {
+    Memory = 0,
+    Process = 1,
+    Network = 2,
+    File = 3,
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for FilterKey {}

@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::events::{EventHeader, ProcessId};
-use bpfx_common::raw::FileModeFilter;
+use bpfx_common::raw::{FileModeFilter, FilterKey};
 use futures::Stream;
 
 #[derive(Debug, Clone, Copy)]
@@ -259,6 +259,7 @@ impl BitOrAssign for FileEventMask {
 pub struct FileFilter {
     pub event_type: FileEventMask,
     pub file_mode: UserFileFilter,
+    pub filter: FilterKey,
 }
 
 impl Default for FileFilter {
@@ -266,6 +267,7 @@ impl Default for FileFilter {
         Self {
             event_type: FileEventMask::ALL,
             file_mode: UserFileFilter::default(),
+            filter: FilterKey::None,
         }
     }
 }
@@ -274,36 +276,43 @@ impl FileFilter {
     pub const OPEN: Self = Self {
         event_type: FileEventMask::OPEN,
         file_mode: UserFileFilter::FILE_REG,
+        filter: FilterKey::None,
     };
 
     pub const CLOSE: Self = Self {
         event_type: FileEventMask::CLOSE,
         file_mode: UserFileFilter::FILE_REG,
+        filter: FilterKey::None,
     };
 
     pub const READ: Self = Self {
         event_type: FileEventMask::READ,
         file_mode: UserFileFilter::FILE_REG,
+        filter: FilterKey::None,
     };
 
     pub const WRITE: Self = Self {
         event_type: FileEventMask::WRITE,
         file_mode: UserFileFilter::FILE_REG,
+        filter: FilterKey::None,
     };
 
     pub const DELETE: Self = Self {
         event_type: FileEventMask::DELETE,
         file_mode: UserFileFilter::FILE_REG,
+        filter: FilterKey::None,
     };
 
     pub const RENAME: Self = Self {
         event_type: FileEventMask::RENAME,
         file_mode: UserFileFilter::FILE_REG,
+        filter: FilterKey::None,
     };
 
     pub const ALL: Self = Self {
         event_type: FileEventMask::ALL,
         file_mode: UserFileFilter::FILE_REG,
+        filter: FilterKey::None,
     };
 }
 

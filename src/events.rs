@@ -1,5 +1,4 @@
 #![allow(unused)]
-
 use std::{net::IpAddr, time::Duration};
 
 #[derive(Debug)]

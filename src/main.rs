@@ -10,6 +10,7 @@ use bpfx::{
     network::{EventMask, NetworkEvent, PollNetwork, Protocol, ProtocolMask},
 };
 
+use bpfx_common::raw::FilterKey;
 use futures::{Stream, StreamExt};
 use std::os::fd::{self, FromRawFd};
 use tokio::sync::mpsc;
@@ -26,6 +27,7 @@ async fn main() -> anyhow::Result<()> {
 
     let filter = MemoryFilter {
         mask: MemoryMask::MMAP,
+        filter: FilterKey::Pid(1958),
     };
 
     // let filter = ProcessFilter {
@@ -37,12 +39,12 @@ async fn main() -> anyhow::Result<()> {
     //     events: EventMask::LISTEN,
     // };
 
-    let mut exec = bpfx.poll_process(ProcessFilter::ALL)?;
+    let mut exec = bpfx.poll_memory(filter)?;
 
     bpfx.run();
 
     while let Some(event) = exec.next().await {
-        println!("{:?}", event.is_kernel_thread());
+        println!("{:?}", event);
     }
 
     Ok(())

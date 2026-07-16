@@ -1,5 +1,6 @@
 #![allow(unused)]
 use crate::events::{EventHeader, ProcessId};
+use bpfx_common::raw::FilterKey;
 use futures::Stream;
 use std::{
     fmt::Debug,
@@ -113,12 +114,14 @@ impl BitOrAssign for MemoryMask {
 #[derive(Debug, Clone)]
 pub struct MemoryFilter {
     pub mask: MemoryMask,
+    pub filter: FilterKey,
 }
 
 impl Default for MemoryFilter {
     fn default() -> Self {
         Self {
             mask: MemoryMask::ALL,
+            filter: FilterKey::None,
         }
     }
 }
@@ -126,13 +129,16 @@ impl Default for MemoryFilter {
 impl MemoryFilter {
     pub const ALL: Self = Self {
         mask: MemoryMask::ALL,
+        filter: FilterKey::None,
     };
 
     pub const MMAP: Self = Self {
         mask: MemoryMask::MMAP,
+        filter: FilterKey::None,
     };
 
     pub const UNMAP: Self = Self {
         mask: MemoryMask::UNMAP,
+        filter: FilterKey::None,
     };
 }

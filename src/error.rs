@@ -26,6 +26,9 @@ pub enum Error {
     #[error("failed to get mutable reference to program")]
     ProgramNotFound,
 
+    #[error("no active event subscriptions remain")]
+    NoActiveSubscriptions,
+
     //Change the names of the maps.
     #[error("failed to get mutable on FILTER ArrayMap")]
     FilterNotFound,

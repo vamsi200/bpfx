@@ -75,10 +75,18 @@ impl Bpfx {
         })
     }
 
+    fn has_subscribers(&self) -> bool {
+        self.network.as_ref().is_some_and(|r| !r.tx.is_closed())
+            || self.process.as_ref().is_some_and(|r| !r.tx.is_closed())
+            || self.file.as_ref().is_some_and(|r| !r.tx.is_closed())
+            || self.mem.as_ref().is_some_and(|r| !r.tx.is_closed())
+    }
+
     pub fn subscribe<S>(&mut self, filter: S) -> Result<S::Stream>
     where
         S: Subscription,
     {
+        log::info!("Trying to subscribe..");
         filter.subscribe(self)
     }
 
@@ -88,6 +96,10 @@ impl Bpfx {
 
     async fn run_boy(mut self) -> Result<()> {
         loop {
+            if !self.has_subscribers() {
+                break Err(crate::error::Error::NoActiveSubscriptions);
+            }
+
             if let Some(events) = self.ringbuf.next() {
                 if let Some(nr) = &self.network {
                     convert_network_events(&nr.tx, &events)?;
@@ -434,6 +446,7 @@ pub fn attach_network_probe(
     bpf: &mut Ebpf,
     btf: &Btf,
 ) -> crate::error::Result<()> {
+    log::info!("attaching network probe..");
     write_to_fiter_map(&Filters::Network(filter), FilterOwner::Network, bpf)?;
 
     if filter.protocol_mask.contains(&ProtocolMask::TCP)
@@ -484,6 +497,7 @@ pub fn attach_network_probe(
         attach_fexit(bpf, btf, UDP_CLOSE.0, UDP_CLOSE.1)?;
     }
 
+    log::info!("attached network probe..");
     Ok(())
 }
 

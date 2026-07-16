@@ -1,24 +1,19 @@
-#![allow(unused)]
+use crate::error::Result;
 use crate::file::{
-    FileCloseEvent, FileDeleteEvent, FileEvent, FileEventMask, FileFilter, FileOpenEvent,
-    FileReadEvent, FileRenameEvent, FileType, FileWriteEvent, PollFile, UserFileFilter,
+    FileCloseEvent, FileDeleteEvent, FileEvent, FileFilter, FileOpenEvent, FileReadEvent,
+    FileRegister, FileRenameEvent, FileType, FileWriteEvent,
 };
-use crate::memory::{MemoryEvent, MemoryFilter, MemoryMapEvent, MemoryMask, PollMem};
-use crate::memory::{MemoryEvent::*, MemoryUnmapEvent};
+use crate::memory::{MemRegister, MemoryUnmapEvent};
+use crate::memory::{MemoryEvent, MemoryFilter, MemoryMapEvent, MemoryMask};
 use crate::network::{
-    BindEvent, EventMask, ListenEvent, NetworkEvent::*, NetworkFilter, PollNetwork, Protocol,
-    ProtocolMask,
+    BindEvent, ListenEvent, NetworkFilter, NetworkRegister, Protocol, ProtocolMask,
 };
-use crate::process::ProcessEvent::*;
-use crate::process::*;
-use crate::process::{
-    self, PollProcess, ProcessEvent, ProcessExitEvent, ProcessFilter, ProcessMask,
-};
+use crate::process::{ProcessEvent, ProcessExitEvent, ProcessFilter, ProcessMask};
+use crate::{FileMask, NetworkMask, process::*};
 use crate::{
-    events::EventHeader,
+    common::EventHeader,
     network::{AcceptEvent, CloseEvent, ConnectEvent, NetworkEvent, SocketEndpoints},
 };
-use anyhow::{Error, Result};
 use aya::maps::MapData;
 use aya::maps::ring_buf::RingBufItem;
 use aya::programs::TracePoint;
@@ -27,67 +22,46 @@ use aya::{
     maps::RingBuf,
     programs::{FEntry, FExit, KProbe},
 };
-use aya_ebpf::maps::HashMap;
 use aya_log::EbpfLogger;
 use bpfx_common::raw::*;
-use futures::stream::Filter;
-use std::fmt::Debug;
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     ptr,
 };
-use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::{self, error::TrySendError};
-use tokio::time::error::Elapsed;
-
-#[derive(Debug, Clone)]
-struct NetworkRegister {
-    filter: NetworkFilter,
-    tx: Sender<NetworkEvent>,
-}
-
-#[derive(Debug)]
-struct ProcessRegister {
-    filter: ProcessFilter,
-    tx: Sender<ProcessEvent>,
-}
-
-#[derive(Debug)]
-struct FileRegister {
-    filter: FileFilter,
-    tx: Sender<FileEvent>,
-}
-
-#[derive(Debug)]
-struct MemRegister {
-    filter: MemoryFilter,
-    tx: Sender<MemoryEvent>,
-}
 
 pub struct Bpfx {
-    bpf: Ebpf,
-    btf: Btf,
+    pub bpf: Ebpf,
+    pub btf: Btf,
     ringbuf: RingBuf<MapData>,
-    network: Option<NetworkRegister>,
-    process: Option<ProcessRegister>,
-    file: Option<FileRegister>,
-    mem: Option<MemRegister>,
+    pub network: Option<NetworkRegister>,
+    pub process: Option<ProcessRegister>,
+    pub file: Option<FileRegister>,
+    pub mem: Option<MemRegister>,
+}
+
+pub trait Subscription {
+    type Event;
+    type Stream;
+
+    fn subscribe(self, bpfx: &mut Bpfx) -> crate::error::Result<Self::Stream>;
 }
 
 impl Bpfx {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new() -> Result<Self> {
         env_logger::init();
 
-        let mut bpf = Ebpf::load(include_bytes_aligned!(
-            "../target/bpfel-unknown-none/release/bpfx-ebpf"
-        ))?;
+        let mut bpf = Ebpf::load(include_bytes_aligned!(env!("BPFX_EBPF")))?;
 
         let btf = Btf::from_sys_fs()?;
-        EbpfLogger::init(&mut bpf)?;
+
+        if let Err(e) = EbpfLogger::init(&mut bpf) {
+            log::debug!("failed to initialize eBPF logger: {e}");
+        }
 
         let events = bpf
             .take_map("EVENTS")
-            .ok_or_else(|| anyhow::anyhow!("EVENTS not found"))?;
+            .ok_or_else(|| crate::error::Error::EventNotFound)?;
 
         let ringbuf = RingBuf::try_from(events)?;
         Ok(Self {
@@ -101,62 +75,34 @@ impl Bpfx {
         })
     }
 
-    pub fn poll_network(&mut self, filter: NetworkFilter) -> anyhow::Result<PollNetwork> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<NetworkEvent>(1024);
-        let nr = NetworkRegister { filter, tx };
-        attach_network_probe(&nr.filter, &mut self.bpf, &self.btf)?;
-        self.network = Some(nr);
-
-        Ok(PollNetwork { rx })
+    pub fn subscribe<S>(&mut self, filter: S) -> Result<S::Stream>
+    where
+        S: Subscription,
+    {
+        filter.subscribe(self)
     }
 
-    pub fn poll_process(&mut self, filter: ProcessFilter) -> anyhow::Result<PollProcess> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<ProcessEvent>(1024);
-        let pr = ProcessRegister { filter, tx };
-        attach_process_probe(&pr.filter, &mut self.bpf, &self.btf)?;
-        self.process = Some(pr);
-        Ok(PollProcess { rx })
-    }
-
-    pub fn poll_file(&mut self, filter: FileFilter) -> anyhow::Result<PollFile> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<FileEvent>(1024);
-        let fr = FileRegister { filter, tx };
-        attach_file_probe(&fr.filter, &mut self.bpf, &self.btf)?;
-        self.file = Some(fr);
-
-        Ok(PollFile { rx })
-    }
-
-    pub fn poll_memory(&mut self, filter: MemoryFilter) -> anyhow::Result<PollMem> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<MemoryEvent>(1024);
-        let fr = MemRegister { filter, tx };
-        attach_mem_probe(&fr.filter, &mut self.bpf, &self.btf)?;
-        self.mem = Some(fr);
-
-        Ok(PollMem { rx })
-    }
-
-    pub fn run(self) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    pub fn run(self) -> tokio::task::JoinHandle<Result<()>> {
         tokio::spawn(async move { self.run_boy().await })
     }
 
-    pub async fn run_boy(mut self) -> Result<()> {
+    async fn run_boy(mut self) -> Result<()> {
         loop {
             if let Some(events) = self.ringbuf.next() {
                 if let Some(nr) = &self.network {
-                    convert_network_events(&mut self.bpf, &self.btf, &nr.tx, &nr.filter, &events)?;
+                    convert_network_events(&nr.tx, &events)?;
                 }
 
                 if let Some(pr) = &self.process {
-                    convert_process_events(&mut self.bpf, &self.btf, &pr.tx, &pr.filter, &events)?;
+                    convert_process_events(&pr.tx, &events)?;
                 }
 
                 if let Some(pr) = &self.file {
-                    convert_file_events(&mut self.bpf, &self.btf, &pr.tx, &pr.filter, &events)?;
+                    convert_file_events(&pr.tx, &events)?;
                 }
 
                 if let Some(pr) = &self.mem {
-                    convert_mem_events(&mut self.bpf, &self.btf, &pr.tx, &pr.filter, &events)?;
+                    convert_mem_events(&pr.tx, &events)?;
                 }
             }
         }
@@ -297,6 +243,7 @@ macro_rules! mem_event {
         })
     };
 }
+
 const TCP_CONNECT: &[(&str, &str)] = &[
     ("tcp_v4_connect", "tcp_v4_connect"),
     ("tcp_v6_connect", "tcp_v6_connect"),
@@ -318,10 +265,10 @@ fn attach_fexit(
     btf: &Btf,
     prog_name: &'static str,
     func_name: &'static str,
-) -> Result<()> {
+) -> crate::error::Result<()> {
     let prog: &mut FExit = bpf
         .program_mut(prog_name)
-        .ok_or(Error::msg("Failed to get mut on Program"))?
+        .ok_or(crate::error::Error::ProgramNotFound)?
         .try_into()?;
 
     prog.load(func_name, btf)?;
@@ -329,10 +276,14 @@ fn attach_fexit(
     Ok(())
 }
 
-fn attach_kprobe(bpf: &mut Ebpf, prog_name: &'static str, symbol: &'static str) -> Result<()> {
+fn attach_kprobe(
+    bpf: &mut Ebpf,
+    prog_name: &'static str,
+    symbol: &'static str,
+) -> crate::error::Result<()> {
     let prog: &mut KProbe = bpf
         .program_mut(prog_name)
-        .ok_or(Error::msg("Failed to get mut on Program"))?
+        .ok_or(crate::error::Error::ProgramNotFound)?
         .try_into()?;
 
     prog.load()?;
@@ -345,13 +296,13 @@ fn attach_fentry(
     btf: &Btf,
     prog_name: &'static str,
     symbol: &'static str,
-) -> Result<()> {
+) -> crate::error::Result<()> {
     let prog: &mut FEntry = bpf
         .program_mut(prog_name)
-        .ok_or(Error::msg("Failed to get mut on Program"))?
+        .ok_or(crate::error::Error::ProgramNotFound)?
         .try_into()?;
 
-    prog.load(prog_name, &btf)?;
+    prog.load(symbol, btf)?;
     prog.attach()?;
     Ok(())
 }
@@ -361,10 +312,10 @@ fn attach_tracepoint(
     prog_name: &'static str,
     category: &'static str,
     tracepoint: &'static str,
-) -> Result<()> {
+) -> crate::error::Result<()> {
     let prog: &mut TracePoint = bpf
         .program_mut(prog_name)
-        .ok_or(Error::msg("Failed to get mut on Program"))?
+        .ok_or(crate::error::Error::ProgramNotFound)?
         .try_into()?;
 
     prog.load()?;
@@ -372,8 +323,8 @@ fn attach_tracepoint(
     Ok(())
 }
 
-fn handle_connect(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) -> Result<()> {
-    let (header, endpoints) = parse_network_event(&event);
+fn handle_connect(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) {
+    let (header, endpoints) = parse_network_event(event);
 
     match event.protocol {
         RawProtocol::Tcp => {
@@ -386,11 +337,11 @@ fn handle_connect(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>)
                 event.retval.unwrap() // unwrap is fine here.
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping network event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping network event: receiver has been closed");
                 }
             }
         }
@@ -405,21 +356,19 @@ fn handle_connect(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>)
                 event.retval.unwrap()
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping network event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping network event: receiver has been closed");
                 }
             }
         }
     }
-
-    Ok(())
 }
 
-fn handle_tcp_accept(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) -> Result<()> {
-    let (header, endpoints) = parse_network_event(&event);
+fn handle_tcp_accept(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) {
+    let (header, endpoints) = parse_network_event(event);
     let protocol = crate::network::Protocol::Tcp;
     match producer.try_send(network_event!(
         Accept,
@@ -429,18 +378,17 @@ fn handle_tcp_accept(event: &PendingConnect, producer: &mpsc::Sender<NetworkEven
         endpoints
     )) {
         Ok(()) => {}
-        Err(TrySendError::Full(val)) => {
-            eprintln!("Failed to send to channel")
+        Err(TrySendError::Full(_)) => {
+            log::warn!("dropping network event: channel is full");
         }
-        Err(TrySendError::Closed(val)) => {
-            eprintln!("Channel Closed :/");
+        Err(TrySendError::Closed(_)) => {
+            log::warn!("dropping network event: receiver has been closed");
         }
     }
-    Ok(())
 }
 
-fn handle_close(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) -> Result<()> {
-    let (header, endpoints) = parse_network_event(&event);
+fn handle_close(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) {
+    let (header, endpoints) = parse_network_event(event);
 
     match event.protocol {
         RawProtocol::Tcp => {
@@ -452,11 +400,11 @@ fn handle_close(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) -
                 endpoints
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping network event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping network event: receiver has been closed");
                 }
             }
         }
@@ -470,32 +418,34 @@ fn handle_close(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) -
                 endpoints
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping network event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping network event: receiver has been closed");
                 }
             }
         }
     }
-
-    Ok(())
 }
 
-fn attach_network_probe(filter: &NetworkFilter, bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
+pub fn attach_network_probe(
+    filter: &NetworkFilter,
+    bpf: &mut Ebpf,
+    btf: &Btf,
+) -> crate::error::Result<()> {
     write_to_fiter_map(&Filters::Network(filter), FilterOwner::Network, bpf)?;
 
     if filter.protocol_mask.contains(&ProtocolMask::TCP)
-        && filter.event_mask.contains(&EventMask::CONNECT)
+        && filter.event_mask.contains(&NetworkMask::CONNECT)
     {
         for probe in TCP_CONNECT {
-            attach_fexit(bpf, &btf, probe.0, probe.1)?;
+            attach_fexit(bpf, btf, probe.0, probe.1)?;
         }
     }
 
     if filter.protocol_mask.contains(&ProtocolMask::TCP)
-        && filter.event_mask.contains(&EventMask::ACCEPT)
+        && filter.event_mask.contains(&NetworkMask::ACCEPT)
     {
         for probe in TCP_ACCEPT {
             attach_kprobe(bpf, probe.0, probe.1)?;
@@ -503,102 +453,107 @@ fn attach_network_probe(filter: &NetworkFilter, bpf: &mut Ebpf, btf: &Btf) -> Re
     }
 
     if filter.protocol_mask.contains(&ProtocolMask::TCP)
-        && filter.event_mask.contains(&EventMask::CLOSE)
+        && filter.event_mask.contains(&NetworkMask::CLOSE)
     {
         attach_fexit(bpf, btf, TCP_CLOSE.0, TCP_CLOSE.1)?;
     }
 
     if filter.protocol_mask.contains(&ProtocolMask::TCP)
-        && filter.event_mask.contains(&EventMask::BIND)
+        && filter.event_mask.contains(&NetworkMask::BIND)
     {
-        attach_fexit(bpf, &btf, "inet_bind", "inet_bind")?;
+        attach_fexit(bpf, btf, "inet_bind", "inet_bind")?;
     }
 
     if filter.protocol_mask.contains(&ProtocolMask::TCP)
-        && filter.event_mask.contains(&EventMask::LISTEN)
+        && filter.event_mask.contains(&NetworkMask::LISTEN)
     {
-        attach_fexit(bpf, &btf, "inet_listen", "inet_listen")?;
+        attach_fexit(bpf, btf, "inet_listen", "inet_listen")?;
     }
 
     if filter.protocol_mask.contains(&ProtocolMask::UDP)
-        && filter.event_mask.contains(&EventMask::CONNECT)
+        && filter.event_mask.contains(&NetworkMask::CONNECT)
     {
         for probe in UDP_CONNECT {
-            attach_fexit(bpf, &btf, probe.0, probe.1)?;
+            attach_fexit(bpf, btf, probe.0, probe.1)?;
         }
     }
 
     if filter.protocol_mask.contains(&ProtocolMask::UDP)
-        && filter.event_mask.contains(&EventMask::CLOSE)
+        && filter.event_mask.contains(&NetworkMask::CLOSE)
     {
-        attach_fexit(bpf, &btf, UDP_CLOSE.0, UDP_CLOSE.1)?;
+        attach_fexit(bpf, btf, UDP_CLOSE.0, UDP_CLOSE.1)?;
     }
 
     Ok(())
 }
 
-// Read and convert the raw event structs to structured and then send to channel..
+fn handle_bind(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) {
+    let (header, endpoints) = parse_network_event(event);
+    let protocol = crate::network::Protocol::Tcp;
+    match producer.try_send(network_event!(
+        Bind,
+        BindEvent,
+        header,
+        protocol,
+        endpoints,
+        event.retval.unwrap() // unwrap here is fine.
+    )) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            log::warn!("dropping network event: channel is full");
+        }
+        Err(TrySendError::Closed(_)) => {
+            log::warn!("dropping network event: receiver has been closed");
+        }
+    }
+}
+
+fn handle_listen(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) {
+    let (header, endpoints) = parse_network_event(event);
+    let protocol = crate::network::Protocol::Tcp;
+
+    match producer.try_send(network_event!(
+        Listen,
+        ListenEvent,
+        header,
+        protocol,
+        endpoints,
+        event.retval.unwrap()
+    )) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            log::warn!("dropping network event: channel is full");
+        }
+        Err(TrySendError::Closed(_)) => {
+            log::warn!("dropping network event: receiver has been closed");
+        }
+    }
+}
+
 pub fn convert_network_events(
-    bpf: &mut Ebpf,
-    btf: &Btf,
     producer: &mpsc::Sender<NetworkEvent>,
-    filter: &NetworkFilter,
     events: &RingBufItem<'_>,
-) -> Result<()> {
+) -> crate::error::Result<()> {
     let ptr = events.as_ptr();
     let event = unsafe { ptr::read(ptr as *const PendingConnect) };
 
     match event.header.event_type {
-        EventType::Connect => handle_connect(&event, &producer)?,
-        EventType::Accept => handle_tcp_accept(&event, &producer)?,
-        EventType::Close => handle_close(&event, &producer)?,
-        EventType::Bind => {
-            let (header, endpoints) = parse_network_event(&event);
-            let protocol = crate::network::Protocol::Tcp;
-            match producer.try_send(network_event!(
-                Bind,
-                BindEvent,
-                header,
-                protocol,
-                endpoints,
-                event.retval.unwrap() // unwrap here is fine.
-            )) {
-                Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
-                }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
-                }
-            }
-        }
-        EventType::Listen => {
-            let (header, endpoints) = parse_network_event(&event);
-            let protocol = crate::network::Protocol::Tcp;
-            match producer.try_send(network_event!(
-                Listen,
-                ListenEvent,
-                header,
-                protocol,
-                endpoints,
-                event.retval.unwrap()
-            )) {
-                Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
-                }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
-                }
-            }
-        }
+        EventType::Connect => handle_connect(&event, producer),
+        EventType::Accept => handle_tcp_accept(&event, producer),
+        EventType::Close => handle_close(&event, producer),
+        EventType::Bind => handle_bind(&event, producer),
+        EventType::Listen => handle_listen(&event, producer),
         _ => {}
     }
 
     Ok(())
 }
 
-fn attach_process_probe(filter: &ProcessFilter, bpf: &mut Ebpf, btf: &Btf) -> anyhow::Result<()> {
+pub fn attach_process_probe(
+    filter: &ProcessFilter,
+    bpf: &mut Ebpf,
+    btf: &Btf,
+) -> crate::error::Result<()> {
     write_to_fiter_map(&Filters::Process(filter), FilterOwner::Process, bpf)?;
 
     if filter.mask.contains(&ProcessMask::START) {
@@ -610,7 +565,7 @@ fn attach_process_probe(filter: &ProcessFilter, bpf: &mut Ebpf, btf: &Btf) -> an
     }
 
     if filter.mask.contains(&ProcessMask::EXIT) {
-        attach_fentry(bpf, &btf, "do_group_exit", "do_group_exit")?;
+        attach_fentry(bpf, btf, "do_group_exit", "do_group_exit")?;
     }
 
     Ok(())
@@ -635,12 +590,9 @@ fn convert_header(header: RawEventHeader) -> EventHeader {
 }
 
 pub fn convert_process_events(
-    bpf: &mut Ebpf,
-    btf: &Btf,
     producer: &mpsc::Sender<ProcessEvent>,
-    filter: &ProcessFilter,
     events: &RingBufItem<'_>,
-) -> anyhow::Result<()> {
+) -> crate::error::Result<()> {
     let ptr = events.as_ptr();
     let header = unsafe { ptr::read(ptr as *const RawEventHeader) };
 
@@ -660,11 +612,11 @@ pub fn convert_process_events(
                 String::from_utf8_lossy(&event.filename[..file_name_len]).into_owned()
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping process event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping process event: receiver has been closed");
                 }
             }
         }
@@ -678,11 +630,11 @@ pub fn convert_process_events(
                 event.exit_code
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping process event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping process event: receiver has been closed");
                 }
             };
         }
@@ -703,11 +655,11 @@ pub fn convert_process_events(
                 String::from_utf8_lossy(&event.child_comm[..comm_len]).into_owned()
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping process event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping process event: receiver has been closed");
                 }
             };
         }
@@ -717,12 +669,12 @@ pub fn convert_process_events(
     Ok(())
 }
 
-fn write_to_map(bpf: &mut Ebpf, filter: &FileFilter) -> Result<()> {
+fn write_to_map(bpf: &mut Ebpf, filter: &FileFilter) -> crate::error::Result<()> {
     use aya::maps::HashMap;
 
     let mut config: HashMap<_, u32, FileModeFilter> = HashMap::try_from(
         bpf.map_mut("CONFIG")
-            .ok_or(Error::msg("Failed to get mut on HashMap"))?,
+            .ok_or(crate::error::Error::ConfigNotFound)?,
     )?;
 
     config.insert(0, FileModeFilter::from(filter.file_mode.clone()), 0)?;
@@ -730,44 +682,45 @@ fn write_to_map(bpf: &mut Ebpf, filter: &FileFilter) -> Result<()> {
     Ok(())
 }
 
-fn attach_file_probe(filter: &FileFilter, bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
+pub fn attach_file_probe(
+    filter: &FileFilter,
+    bpf: &mut Ebpf,
+    btf: &Btf,
+) -> crate::error::Result<()> {
     write_to_fiter_map(&Filters::File(filter), FilterOwner::File, bpf)?;
     write_to_map(bpf, filter)?;
 
-    if filter.event_type.contains(&FileEventMask::OPEN) {
+    if filter.event_type.contains(&FileMask::OPEN) {
         attach_fexit(bpf, btf, "vfs_open", "vfs_open")?;
     }
 
-    if filter.event_type.contains(&FileEventMask::CLOSE) {
-        attach_fentry(bpf, btf, "filp_close", "filp_close")?;
+    if filter.event_type.contains(&FileMask::CLOSE) {
+        attach_fexit(bpf, btf, "filp_close", "filp_close")?;
     }
 
-    if filter.event_type.contains(&FileEventMask::READ) {
+    if filter.event_type.contains(&FileMask::READ) {
         attach_fexit(bpf, btf, "vfs_read", "vfs_read")?;
     }
 
-    if filter.event_type.contains(&FileEventMask::WRITE) {
+    if filter.event_type.contains(&FileMask::WRITE) {
         attach_fexit(bpf, btf, "vfs_write", "vfs_write")?;
     }
 
-    if filter.event_type.contains(&FileEventMask::DELETE) {
-        attach_fentry(bpf, btf, "vfs_unlink", "vfs_unlink")?;
+    if filter.event_type.contains(&FileMask::DELETE) {
+        attach_fexit(bpf, btf, "vfs_unlink", "vfs_unlink")?;
     }
 
-    if filter.event_type.contains(&FileEventMask::RENAME) {
-        attach_fentry(bpf, btf, "vfs_rename", "vfs_rename")?;
+    if filter.event_type.contains(&FileMask::RENAME) {
+        attach_fexit(bpf, btf, "vfs_rename", "vfs_rename")?;
     }
 
     Ok(())
 }
 
 fn convert_file_events(
-    bpf: &mut Ebpf,
-    btf: &Btf,
     producer: &mpsc::Sender<FileEvent>,
-    filter: &FileFilter,
     events: &RingBufItem<'_>,
-) -> anyhow::Result<()> {
+) -> crate::error::Result<()> {
     let ptr = events.as_ptr();
     let header = unsafe { ptr::read(ptr as *const RawEventHeader) };
 
@@ -790,11 +743,11 @@ fn convert_file_events(
                 event.retval
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
                 }
             }
         }
@@ -816,11 +769,11 @@ fn convert_file_events(
                 event.retval
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
                 }
             }
         }
@@ -842,11 +795,11 @@ fn convert_file_events(
                 event.retval
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
                 }
             }
         }
@@ -868,11 +821,11 @@ fn convert_file_events(
                 event.retval
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
                 }
             }
         }
@@ -894,11 +847,11 @@ fn convert_file_events(
                 event.retval
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
                 }
             }
         }
@@ -927,11 +880,11 @@ fn convert_file_events(
                 event.retval
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
                 }
             }
         }
@@ -949,12 +902,16 @@ enum Filters<'a> {
     Process(&'a ProcessFilter),
 }
 
-fn write_to_fiter_map(filter_type: &Filters, owner: FilterOwner, bpf: &mut Ebpf) -> Result<()> {
+fn write_to_fiter_map(
+    filter_type: &Filters,
+    owner: FilterOwner,
+    bpf: &mut Ebpf,
+) -> crate::error::Result<()> {
     use aya::maps::HashMap;
 
     let mut filter: HashMap<_, u32, FilterKey> = HashMap::try_from(
         bpf.map_mut("FILTER")
-            .ok_or(Error::msg("Failed to get mut on Array Map"))?,
+            .ok_or(crate::error::Error::FilterNotFound)?,
     )?;
 
     let filter_type = match filter_type {
@@ -968,7 +925,11 @@ fn write_to_fiter_map(filter_type: &Filters, owner: FilterOwner, bpf: &mut Ebpf)
     Ok(())
 }
 
-fn attach_mem_probe(filter: &MemoryFilter, bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
+pub fn attach_mem_probe(
+    filter: &MemoryFilter,
+    bpf: &mut Ebpf,
+    btf: &Btf,
+) -> crate::error::Result<()> {
     write_to_fiter_map(&Filters::Memory(filter), FilterOwner::Memory, bpf)?;
 
     if filter.mask.contains(MemoryMask::MMAP) {
@@ -983,12 +944,9 @@ fn attach_mem_probe(filter: &MemoryFilter, bpf: &mut Ebpf, btf: &Btf) -> Result<
 }
 
 fn convert_mem_events(
-    bpf: &mut Ebpf,
-    btf: &Btf,
     producer: &mpsc::Sender<MemoryEvent>,
-    filter: &MemoryFilter,
     events: &RingBufItem<'_>,
-) -> Result<()> {
+) -> crate::error::Result<()> {
     let ptr = events.as_ptr();
     let header = unsafe { ptr::read(ptr as *const RawEventHeader) };
 
@@ -1006,11 +964,11 @@ fn convert_mem_events(
                 event.mapped_address
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping memory event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping memory event: receiver has been closed");
                 }
             }
         }
@@ -1026,11 +984,11 @@ fn convert_mem_events(
                 event.mapped_address
             )) {
                 Ok(()) => {}
-                Err(TrySendError::Full(val)) => {
-                    eprintln!("Failed to send to channel")
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping memory event: channel is full");
                 }
-                Err(TrySendError::Closed(val)) => {
-                    eprintln!("Channel Closed :/");
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping memory event: receiver has been closed");
                 }
             }
         }

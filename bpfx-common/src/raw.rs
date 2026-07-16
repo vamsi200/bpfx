@@ -5,6 +5,14 @@ use core::ops::{BitOr, BitOrAssign};
 pub const TASK_COMM_LEN: usize = 16;
 pub const DNS_NAME_MAX: usize = 256;
 
+pub const FILE_REG: u16 = 1 << 0;
+pub const FILE_DIR: u16 = 1 << 1;
+pub const FILE_CHR: u16 = 1 << 2;
+pub const FILE_BLK: u16 = 1 << 3;
+pub const FILE_FIFO: u16 = 1 << 4;
+pub const FILE_LNK: u16 = 1 << 5;
+pub const FILE_SOCK: u16 = 1 << 6;
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 pub enum EventType {
@@ -151,10 +159,14 @@ pub struct RawFileReadEvent {
 #[cfg(feature = "user")]
 use aya::Pod;
 
+/// Internal bitmask representation of selected file types.
+///
+/// This type is shared with the eBPF program and is not intended for
+/// direct construction by users.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FileModeFilter {
-    pub file_types: u16,
+    pub mode: u16,
 }
 
 #[cfg(feature = "user")]
@@ -208,15 +220,33 @@ pub struct RawMemoryUnmapEvent {
     pub mapped_address: usize,
 }
 
+/// Restricts events to a specific process or user.
+///
+///
+/// # Examples
+///
+/// ```rust
+/// # use bpfx::{file::FileFilter, FilterKey};
+/// let filter = FileFilter {
+///     filter: FilterKey::Pid(1234),
+///     ..Default::default()
+/// };
+/// ```
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub enum FilterKey {
+    /// Do not apply additional filtering.
     None,
+    /// Match a specific process ID.
     Pid(u32),
+    /// Match a specific thread ID.
     Tid(u32),
+    /// Match a specific parent process ID.
     Ppid(u32),
+    /// Match a specific user ID.
     Uid(u32),
+    /// Match a specific group ID.
     Gid(u32),
 }
 

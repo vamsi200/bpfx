@@ -1,14 +1,20 @@
-#![allow(unused)]
 #![allow(non_snake_case)]
-use core::fmt;
+use crate::error::*;
+use crate::{
+    Bpfx,
+    common::{EventHeader, ProcessId},
+    core::{Subscription, attach_file_probe},
+};
+use bpfx_common::raw::{
+    FILE_BLK, FILE_CHR, FILE_DIR, FILE_FIFO, FILE_LNK, FILE_REG, FILE_SOCK, FileModeFilter,
+    FilterKey,
+};
+use futures::Stream;
 use std::{
     ops::{BitOr, BitOrAssign},
     time::Duration,
 };
-
-use crate::events::{EventHeader, ProcessId};
-use bpfx_common::raw::{FileModeFilter, FilterKey};
-use futures::Stream;
+use tokio::sync::mpsc::Sender;
 
 #[derive(Debug, Clone, Copy)]
 pub enum FileType {
@@ -24,16 +30,14 @@ pub enum FileType {
 
 impl From<FileModeFilter> for FileType {
     fn from(mode: FileModeFilter) -> Self {
-        const S_IFMT: u16 = 0o170000;
-
-        match mode.file_types & S_IFMT {
-            S_IFREG => Self::Regular,
-            S_IFDIR => Self::Directory,
-            S_IFCHR => Self::CharDevice,
-            S_IFBLK => Self::BlockDevice,
-            S_IFIFO => Self::Fifo,
-            S_IFLNK => Self::Symlink,
-            S_IFSOCK => Self::Socket,
+        match mode.mode {
+            FILE_REG => Self::Regular,
+            FILE_DIR => Self::Directory,
+            FILE_CHR => Self::CharDevice,
+            FILE_BLK => Self::BlockDevice,
+            FILE_FIFO => Self::Fifo,
+            FILE_LNK => Self::Symlink,
+            FILE_SOCK => Self::Socket,
             _ => Self::Unknown,
         }
     }
@@ -202,6 +206,12 @@ impl FileEvent {
     }
 }
 
+/// A stream of file events.
+///
+/// Instances of this type are returned by [`Bpfx::subscribe`] when subscribing
+/// with a [`FileFilter`].
+///
+/// Implements [`futures::Stream`], yielding [`FileEvent`].
 pub struct PollFile {
     pub rx: tokio::sync::mpsc::Receiver<FileEvent>,
 }
@@ -217,10 +227,18 @@ impl Stream for PollFile {
     }
 }
 
+/// Bitmask describing which file operations should generate events.
+///
+/// # Examples
+///
+/// ```rust
+/// # use bpfx::file::FileMask;
+/// let mask = FileMask::OPEN | FileMask::WRITE | FileMask::DELETE;
+/// ```
 #[derive(Debug)]
-pub struct FileEventMask(u8);
+pub struct FileMask(u8);
 
-impl FileEventMask {
+impl FileMask {
     pub const OPEN: Self = Self(1 << 0);
     pub const CLOSE: Self = Self(1 << 1);
     pub const READ: Self = Self(1 << 2);
@@ -242,127 +260,194 @@ impl FileEventMask {
     }
 }
 
-impl BitOr for FileEventMask {
+impl BitOr for FileMask {
     type Output = Self;
     fn bitor(self, rhs: Self) -> Self::Output {
         Self(self.0 | rhs.0)
     }
 }
 
-impl BitOrAssign for FileEventMask {
+impl BitOrAssign for FileMask {
     fn bitor_assign(&mut self, rhs: Self) {
         self.0 |= rhs.0;
     }
 }
 
+/// Configures which file events are delivered.
+///
+/// A `FileFilter` controls:
+///
+/// - which kinds of file operations are reported (`event_type`)
+/// - which file types are monitored (`file_mode`)
+/// - an optional process-based filter (`filter`)
+///
+/// # Examples
+///
+/// Monitor file opens and renames for regular files:
+///
+/// ```rust
+/// # use bpfx::{FileFilter, FileMask, FileTypeFilter};
+/// let filter = FileFilter {
+///     event_type: FileMask::OPEN | FileMask::RENAME,
+///     file_mode: FileTypeFilter::FILE_REG,
+///     ..Default::default()
+/// };
+/// ```
 #[derive(Debug)]
 pub struct FileFilter {
-    pub event_type: FileEventMask,
-    pub file_mode: UserFileFilter,
+    pub event_type: FileMask,
+    pub file_mode: FileTypeFilter,
     pub filter: FilterKey,
 }
 
 impl Default for FileFilter {
     fn default() -> Self {
         Self {
-            event_type: FileEventMask::ALL,
-            file_mode: UserFileFilter::default(),
+            event_type: FileMask::ALL,
+            file_mode: FileTypeFilter::default(),
             filter: FilterKey::None,
         }
     }
 }
 
+/// Internal registration state for a file event subscription.
+///
+/// Stores the active filter and the channel used to deliver events
+/// to the corresponding event stream.
+#[derive(Debug)]
+pub struct FileRegister {
+    pub filter: FileFilter,
+    pub tx: Sender<FileEvent>,
+}
+
+impl Subscription for FileFilter {
+    type Event = FileEvent;
+    type Stream = PollFile;
+
+    fn subscribe(self, bpfx: &mut Bpfx) -> Result<Self::Stream> {
+        let (tx, rx) = tokio::sync::mpsc::channel(1024);
+
+        let reg = FileRegister { filter: self, tx };
+
+        attach_file_probe(&reg.filter, &mut bpfx.bpf, &bpfx.btf)?;
+
+        bpfx.file = Some(reg);
+
+        Ok(PollFile { rx })
+    }
+}
+
 impl FileFilter {
     pub const OPEN: Self = Self {
-        event_type: FileEventMask::OPEN,
-        file_mode: UserFileFilter::FILE_REG,
+        event_type: FileMask::OPEN,
+        file_mode: FileTypeFilter::FILE_REG,
         filter: FilterKey::None,
     };
 
     pub const CLOSE: Self = Self {
-        event_type: FileEventMask::CLOSE,
-        file_mode: UserFileFilter::FILE_REG,
+        event_type: FileMask::CLOSE,
+        file_mode: FileTypeFilter::FILE_REG,
         filter: FilterKey::None,
     };
 
     pub const READ: Self = Self {
-        event_type: FileEventMask::READ,
-        file_mode: UserFileFilter::FILE_REG,
+        event_type: FileMask::READ,
+        file_mode: FileTypeFilter::FILE_REG,
         filter: FilterKey::None,
     };
 
     pub const WRITE: Self = Self {
-        event_type: FileEventMask::WRITE,
-        file_mode: UserFileFilter::FILE_REG,
+        event_type: FileMask::WRITE,
+        file_mode: FileTypeFilter::FILE_REG,
         filter: FilterKey::None,
     };
 
     pub const DELETE: Self = Self {
-        event_type: FileEventMask::DELETE,
-        file_mode: UserFileFilter::FILE_REG,
+        event_type: FileMask::DELETE,
+        file_mode: FileTypeFilter::FILE_REG,
         filter: FilterKey::None,
     };
 
     pub const RENAME: Self = Self {
-        event_type: FileEventMask::RENAME,
-        file_mode: UserFileFilter::FILE_REG,
+        event_type: FileMask::RENAME,
+        file_mode: FileTypeFilter::FILE_REG,
         filter: FilterKey::None,
     };
 
     pub const ALL: Self = Self {
-        event_type: FileEventMask::ALL,
-        file_mode: UserFileFilter::FILE_REG,
+        event_type: FileMask::ALL,
+        file_mode: FileTypeFilter::FILE_REG,
         filter: FilterKey::None,
     };
 }
 
+/// Bitmask describing which file types are monitored.
+///
+/// By default, only regular files are monitored.
+///
+/// # Examples
+///
+/// Monitor both regular files and directories:
+///
+/// ```rust
+/// # use bpfx::file::FileTypeFilter;
+/// let types = FileTypeFilter::FILE_REG | UserFileFilter::FILE_DIR;
+/// ```
 #[derive(Debug, Clone)]
-pub struct UserFileFilter(pub FileModeFilter);
+pub struct FileTypeFilter(pub FileModeFilter);
 
-impl UserFileFilter {
-    pub const FILE_REG: Self = Self(FileModeFilter { file_types: 1 << 0 });
-    pub const FILE_DIR: Self = Self(FileModeFilter { file_types: 1 << 1 });
-    pub const FILE_CHR: Self = Self(FileModeFilter { file_types: 1 << 2 });
-    pub const FILE_BLK: Self = Self(FileModeFilter { file_types: 1 << 3 });
-    pub const FILE_FIFO: Self = Self(FileModeFilter { file_types: 1 << 4 });
-    pub const FILE_LNK: Self = Self(FileModeFilter { file_types: 1 << 5 });
-    pub const FILE_SOCK: Self = Self(FileModeFilter { file_types: 1 << 6 });
+impl FileTypeFilter {
+    /// Regular files.
+    pub const FILE_REG: Self = Self(FileModeFilter { mode: 1 << 0 });
+    /// Directories.
+    pub const FILE_DIR: Self = Self(FileModeFilter { mode: 1 << 1 });
+    /// Character devices.
+    pub const FILE_CHR: Self = Self(FileModeFilter { mode: 1 << 2 });
+    /// Block devices.
+    pub const FILE_BLK: Self = Self(FileModeFilter { mode: 1 << 3 });
+    /// FIFOs (named pipes).
+    pub const FILE_FIFO: Self = Self(FileModeFilter { mode: 1 << 4 });
+    /// Symbolic links.
+    pub const FILE_LNK: Self = Self(FileModeFilter { mode: 1 << 5 });
+    /// Unix domain sockets.
+    pub const FILE_SOCK: Self = Self(FileModeFilter { mode: 1 << 6 });
 
+    /// All file types.
     pub const ALL: Self = Self(FileModeFilter {
-        file_types: Self::FILE_REG.0.file_types
-            | Self::FILE_DIR.0.file_types
-            | Self::FILE_CHR.0.file_types
-            | Self::FILE_BLK.0.file_types
-            | Self::FILE_FIFO.0.file_types
-            | Self::FILE_LNK.0.file_types
-            | Self::FILE_SOCK.0.file_types,
+        mode: Self::FILE_REG.0.mode
+            | Self::FILE_DIR.0.mode
+            | Self::FILE_CHR.0.mode
+            | Self::FILE_BLK.0.mode
+            | Self::FILE_FIFO.0.mode
+            | Self::FILE_LNK.0.mode
+            | Self::FILE_SOCK.0.mode,
     });
 }
 
-impl Default for UserFileFilter {
+impl Default for FileTypeFilter {
     fn default() -> Self {
         Self::FILE_REG
     }
 }
 
-impl BitOr for UserFileFilter {
+impl BitOr for FileTypeFilter {
     type Output = Self;
 
     fn bitor(self, rhs: Self) -> Self::Output {
         Self(FileModeFilter {
-            file_types: self.0.file_types | rhs.0.file_types,
+            mode: self.0.mode | rhs.0.mode,
         })
     }
 }
 
-impl BitOrAssign for UserFileFilter {
+impl BitOrAssign for FileTypeFilter {
     fn bitor_assign(&mut self, rhs: Self) {
-        self.0.file_types |= rhs.0.file_types;
+        self.0.mode |= rhs.0.mode;
     }
 }
 
-impl From<UserFileFilter> for FileModeFilter {
-    fn from(value: UserFileFilter) -> Self {
+impl From<FileTypeFilter> for FileModeFilter {
+    fn from(value: FileTypeFilter) -> Self {
         value.0
     }
 }

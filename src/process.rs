@@ -1,11 +1,16 @@
-#![allow(unused)]
-use crate::events::{EventHeader, ProcessId};
+use crate::error::*;
+use crate::{
+    Bpfx,
+    common::{EventHeader, ProcessId},
+    core::{Subscription, attach_process_probe},
+};
 use bpfx_common::raw::FilterKey;
 use futures::Stream;
 use std::{
     ops::{BitOr, BitOrAssign},
     time::Duration,
 };
+use tokio::sync::mpsc::Sender;
 
 /// Emitted after the kernel successfully executes a new program image for a process.
 /// Generated from the `sched_process_exec` tracepoint.
@@ -84,6 +89,12 @@ impl ProcessEvent {
     }
 }
 
+/// A stream of process events.
+///
+/// Instances of this type are returned by [`Bpfx::subscribe`] when subscribing
+/// with a [`ProcessFilter`].
+///
+/// Implements [`futures::Stream`], yielding [`ProcessEvent`].
 pub struct PollProcess {
     pub rx: tokio::sync::mpsc::Receiver<ProcessEvent>,
 }
@@ -99,6 +110,14 @@ impl Stream for PollProcess {
     }
 }
 
+/// Bitmask describing which process events should generate notifications.
+///
+/// # Examples
+///
+/// ```rust
+/// # use bpfx::network::ProcessMask;
+/// let mask = ProcessMask::START | ProcessMask::EXIT;
+/// ```
 #[derive(Debug)]
 pub struct ProcessMask(u8);
 
@@ -127,10 +146,59 @@ impl BitOrAssign for ProcessMask {
     }
 }
 
+/// Configures which process events are delivered.
+///
+/// A `ProcessFilter` controls:
+///
+/// - which process events generate notifications (`mask`)
+/// - an optional process or user filter (`filter`)
+///
+/// # Examples
+///
+/// Monitor process creation events:
+///
+/// ```rust
+/// # use bpfx::process::ProcessFilter;
+/// let filter = ProcessFilter::START;
+/// ```
+///
+/// Monitor process exits for a specific user:
+///
+/// ```rust
+/// # use bpfx::{process::{ProcessFilter, ProcessMask}, FilterKey};
+/// let filter = ProcessFilter {
+///     mask: ProcessMask::EXIT,
+///     filter: FilterKey::Uid(1000),
+/// };
+/// ```
 #[derive(Debug)]
 pub struct ProcessFilter {
     pub mask: ProcessMask,
     pub filter: FilterKey,
+}
+
+/// Internal registration state for a process event subscription.
+///
+/// Stores the active filter and the channel used to deliver events
+/// to the corresponding event stream.
+#[derive(Debug)]
+pub struct ProcessRegister {
+    pub filter: ProcessFilter,
+    pub tx: Sender<ProcessEvent>,
+}
+
+impl Subscription for ProcessFilter {
+    type Event = ProcessEvent;
+    type Stream = PollProcess;
+
+    fn subscribe(self, bpfx: &mut Bpfx) -> Result<Self::Stream> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<ProcessEvent>(1024);
+        let pr = ProcessRegister { filter: self, tx };
+        attach_process_probe(&pr.filter, &mut bpfx.bpf, &bpfx.btf)?;
+        bpfx.process = Some(pr);
+
+        Ok(PollProcess { rx })
+    }
 }
 
 impl Default for ProcessFilter {

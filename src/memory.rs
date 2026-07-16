@@ -1,5 +1,9 @@
-#![allow(unused)]
-use crate::events::{EventHeader, ProcessId};
+use crate::error::*;
+use crate::{
+    Bpfx,
+    common::{EventHeader, ProcessId},
+    core::{Subscription, attach_mem_probe},
+};
 use bpfx_common::raw::FilterKey;
 use futures::Stream;
 use std::{
@@ -7,6 +11,7 @@ use std::{
     ops::{BitOr, BitOrAssign},
     time::Duration,
 };
+use tokio::sync::mpsc::Sender;
 
 /// Emitted when the kernel completes a virtual memory mapping operation.
 /// Generated from the `vm_mmap_pgoff` fexit hook.
@@ -34,8 +39,14 @@ pub struct MemoryUnmapEvent {
     pub mapped_address: usize,
 }
 
+/// A stream of memory events.
+///
+/// Instances of this type are returned by [`Bpfx::subscribe`] when subscribing
+/// with a [`MemoryFilter`].
+///
+/// Implements [`futures::Stream`], yielding [`MemoryEvent`].
 pub struct PollMem {
-    pub rx: tokio::sync::mpsc::Receiver<MemoryEvent>,
+    rx: tokio::sync::mpsc::Receiver<MemoryEvent>,
 }
 
 impl Stream for PollMem {
@@ -84,6 +95,14 @@ impl MemoryEvent {
     }
 }
 
+/// Bitmask describing which memory events should generate notifications.
+///
+/// # Examples
+///
+/// ```rust
+/// # use bpfx::memory::MemoryMask;
+/// let mask = MemoryMask::MMAP | MemoryMask::UNMAP;
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub struct MemoryMask(u8);
 
@@ -111,10 +130,52 @@ impl BitOrAssign for MemoryMask {
     }
 }
 
+/// Configures which memory events are delivered.
+///
+/// A `MemoryFilter` controls:
+///
+/// - which memory operations generate events (`mask`)
+/// - an optional process-based filter (`filter`)
+///
+/// # Examples
+///
+/// Monitor only `mmap` events from a specific process:
+///
+/// ```rust
+/// # use bpfx::{memory::{MemoryFilter, MemoryMask}, FilterKey};
+/// let filter = MemoryFilter {
+///     mask: MemoryMask::MMAP,
+///     filter: FilterKey::Pid(1234),
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct MemoryFilter {
     pub mask: MemoryMask,
     pub filter: FilterKey,
+}
+
+/// Internal registration state for a memory event subscription.
+///
+/// Stores the active filter and the channel used to deliver events
+/// to the corresponding event stream.
+#[derive(Debug)]
+pub struct MemRegister {
+    pub filter: MemoryFilter,
+    pub tx: Sender<MemoryEvent>,
+}
+
+impl Subscription for MemoryFilter {
+    type Event = MemoryEvent;
+    type Stream = PollMem;
+
+    fn subscribe(self, bpfx: &mut Bpfx) -> Result<Self::Stream> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<MemoryEvent>(1024);
+        let fr = MemRegister { filter: self, tx };
+        attach_mem_probe(&fr.filter, &mut bpfx.bpf, &bpfx.btf)?;
+        bpfx.mem = Some(fr);
+
+        Ok(PollMem { rx })
+    }
 }
 
 impl Default for MemoryFilter {

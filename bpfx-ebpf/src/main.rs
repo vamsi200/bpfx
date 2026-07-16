@@ -27,12 +27,7 @@ use aya_ebpf::{EbpfContext, TASK_COMM_LEN};
 use aya_ebpf_macros::{fentry, map};
 use aya_ebpf_macros::{fexit, kretprobe};
 use aya_log_ebpf::info;
-use bpfx_common::raw::{
-    EventType, FileModeFilter, FilterKey, FilterOwner, PendingConnect, RawEventHeader,
-    RawFileCloseEvent, RawFileDeleteEvent, RawFileOpenEvent, RawFileReadEvent, RawFileRenameEvent,
-    RawFileWriteEvent, RawMemoryMapEvent, RawMemoryUnmapEvent, RawProcessExitEvent,
-    RawProcessForkEvent, RawProcessStartEvent,
-};
+use bpfx_common::raw::*;
 use bpfx_common::raw::{IpVersion, RawProtocol};
 use core::ffi::c_int;
 use core::panic::PanicInfo;
@@ -743,18 +738,10 @@ const S_IFREG: u16 = 0o100000;
 const S_IFLNK: u16 = 0o120000;
 const S_IFSOCK: u16 = 0o140000;
 
-const FILE_REG: u16 = 1 << 0;
-const FILE_DIR: u16 = 1 << 1;
-const FILE_CHR: u16 = 1 << 2;
-const FILE_BLK: u16 = 1 << 3;
-const FILE_FIFO: u16 = 1 << 4;
-const FILE_LNK: u16 = 1 << 5;
-const FILE_SOCK: u16 = 1 << 6;
-
 #[inline(always)]
 fn capture_file(file: *const file) -> (bool, FileModeFilter) {
     unsafe {
-        let file_mode = FileModeFilter { file_types: 0 };
+        let file_mode = FileModeFilter { mode: 0 };
 
         let config = match CONFIG.get(&0) {
             Some(v) => v,
@@ -772,10 +759,7 @@ fn capture_file(file: *const file) -> (bool, FileModeFilter) {
             _ => 0,
         };
 
-        (
-            (config.file_types & ty) != 0,
-            FileModeFilter { file_types: ty },
-        )
+        ((config.mode & ty) != 0, FileModeFilter { mode: ty })
     }
 }
 
@@ -889,7 +873,7 @@ fn try_vfs_write(ctx: FExitContext) -> Result<i32, i32> {
 #[inline(always)]
 fn capture_inode(inode: *const inode) -> (bool, FileModeFilter) {
     unsafe {
-        let file_mode = FileModeFilter { file_types: 0 };
+        let file_mode = FileModeFilter { mode: 0 };
         let config = match CONFIG.get(&0) {
             Some(v) => v,
             None => return (false, file_mode),
@@ -906,10 +890,7 @@ fn capture_inode(inode: *const inode) -> (bool, FileModeFilter) {
             _ => 0,
         };
 
-        (
-            (config.file_types & ty) != 0,
-            FileModeFilter { file_types: ty },
-        )
+        ((config.mode & ty) != 0, FileModeFilter { mode: ty })
     }
 }
 

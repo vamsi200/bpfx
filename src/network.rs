@@ -1,15 +1,16 @@
-#![allow(unused)]
-
-use crate::events::EventHeader;
-use bpfx_common::raw::FilterKey;
-use futures::{Stream, StreamExt};
-use std::{
-    env::JoinPathsError,
-    net::IpAddr,
-    ops::{BitAnd, BitOr, BitOrAssign},
-    pin::Pin,
-    sync::mpsc,
+use crate::error::*;
+use crate::{
+    Bpfx,
+    common::EventHeader,
+    core::{Subscription, attach_network_probe},
 };
+use bpfx_common::raw::FilterKey;
+use futures::Stream;
+use std::{
+    net::IpAddr,
+    ops::{BitOr, BitOrAssign},
+};
+use tokio::sync::mpsc::Sender;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -26,9 +27,14 @@ pub struct SocketEndpoints {
     pub remote_port: u16,
 }
 
-// TODO: Change the name
+/// A stream of network events.
+///
+/// Instances of this type are returned by [`Bpfx::subscribe`] when subscribing
+/// with a [`NetworkFilter`].
+///
+/// Implements [`futures::Stream`], yielding [`NetworkEvent`].
 pub struct PollNetwork {
-    pub rx: tokio::sync::mpsc::Receiver<NetworkEvent>,
+    rx: tokio::sync::mpsc::Receiver<NetworkEvent>,
 }
 
 impl Stream for PollNetwork {
@@ -42,6 +48,14 @@ impl Stream for PollNetwork {
     }
 }
 
+/// Bitmask describing which transport protocols should be monitored.
+///
+/// # Examples
+///
+/// ```rust
+/// # use bpfx::network::ProtocolMask;
+/// let protocols = ProtocolMask::TCP | ProtocolMask::UDP;
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub struct ProtocolMask(u8);
 
@@ -70,10 +84,18 @@ impl BitOrAssign for ProtocolMask {
     }
 }
 
+/// Bitmask describing which network events should generate notifications.
+///
+/// # Examples
+///
+/// ```rust
+/// # use bpfx::network::NetworkMask;
+/// let mask = NetworkMask::CONNECT | NetworkMask::CLOSE;
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
-pub struct EventMask(u8);
+pub struct NetworkMask(u8);
 
-impl EventMask {
+impl NetworkMask {
     pub const CONNECT: Self = Self(1 << 0);
     pub const ACCEPT: Self = Self(1 << 1);
     pub const CLOSE: Self = Self(1 << 2);
@@ -88,7 +110,7 @@ impl EventMask {
     }
 }
 
-impl BitOr for EventMask {
+impl BitOr for NetworkMask {
     type Output = Self;
 
     fn bitor(self, rhs: Self) -> Self::Output {
@@ -96,17 +118,36 @@ impl BitOr for EventMask {
     }
 }
 
-impl BitOrAssign for EventMask {
+impl BitOrAssign for NetworkMask {
     fn bitor_assign(&mut self, rhs: Self) {
         self.0 |= rhs.0;
     }
 }
 
-//TODO: Change these names as well
+/// Configures which network events are delivered.
+///
+/// A `NetworkFilter` controls:
+///
+/// - which transport protocols are monitored (`protocol_mask`)
+/// - which network operations generate events (`event_mask`)
+/// - an optional process-based filter (`filter`)
+///
+/// # Examples
+///
+/// Monitor TCP connect events from a specific process:
+///
+/// ```rust
+/// # use bpfx::{network::{NetworkFilter, NetworkMask, ProtocolMask}, FilterKey};
+/// let filter = NetworkFilter {
+///     protocol_mask: ProtocolMask::TCP,
+///     event_mask: NetworkMask::CONNECT,
+///     filter: FilterKey::Pid(1234),
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct NetworkFilter {
     pub protocol_mask: ProtocolMask,
-    pub event_mask: EventMask,
+    pub event_mask: NetworkMask,
     pub filter: FilterKey,
 }
 
@@ -114,28 +155,55 @@ impl Default for NetworkFilter {
     fn default() -> Self {
         Self {
             protocol_mask: ProtocolMask::ALL,
-            event_mask: EventMask::ALL,
+            event_mask: NetworkMask::ALL,
             filter: FilterKey::None,
         }
+    }
+}
+
+/// Internal registration state for a network event subscription.
+///
+/// Stores the active filter and the channel used to deliver events
+/// to the corresponding event stream.
+#[derive(Debug, Clone)]
+pub struct NetworkRegister {
+    pub filter: NetworkFilter,
+    pub tx: Sender<NetworkEvent>,
+}
+
+impl Subscription for NetworkFilter {
+    type Event = NetworkEvent;
+    type Stream = PollNetwork;
+
+    fn subscribe(self, bpfx: &mut Bpfx) -> Result<Self::Stream> {
+        let (tx, rx) = tokio::sync::mpsc::channel(1024);
+
+        let reg = NetworkRegister { filter: self, tx };
+
+        attach_network_probe(&reg.filter, &mut bpfx.bpf, &bpfx.btf)?;
+
+        bpfx.network = Some(reg);
+
+        Ok(PollNetwork { rx })
     }
 }
 
 impl NetworkFilter {
     pub const ALL: Self = Self {
         protocol_mask: ProtocolMask::ALL,
-        event_mask: EventMask::ALL,
+        event_mask: NetworkMask::ALL,
         filter: FilterKey::None,
     };
 
     pub const TCP: Self = Self {
         protocol_mask: ProtocolMask::TCP,
-        event_mask: EventMask::ALL,
+        event_mask: NetworkMask::ALL,
         filter: FilterKey::None,
     };
 
     pub const UDP: Self = Self {
         protocol_mask: ProtocolMask::UDP,
-        event_mask: EventMask::ALL,
+        event_mask: NetworkMask::ALL,
         filter: FilterKey::None,
     };
 }
@@ -211,7 +279,6 @@ impl NetworkEvent {
             Self::Connect(e) => e.protocol,
             Self::Accept(e) => e.protocol,
             Self::Close(e) => e.protocol,
-            Self::Bind(e) => e.protocol,
             Self::Bind(e) => e.protocol,
             Self::Listen(e) => e.protocol,
         }

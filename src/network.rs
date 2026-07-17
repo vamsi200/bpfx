@@ -5,17 +5,28 @@ use crate::{
     core::{Subscription, attach_network_probe},
 };
 use bpfx_common::raw::FilterKey;
+use core::fmt;
 use futures::Stream;
+use std::fmt::Display;
 use std::{
     net::IpAddr,
     ops::{BitOr, BitOrAssign},
 };
 use tokio::sync::mpsc::Sender;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Protocol {
     Tcp = 1,
     Udp = 2,
+}
+
+impl Display for Protocol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tcp => write!(f, "TCP"),
+            Self::Udp => write!(f, "UDP"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +36,16 @@ pub struct SocketEndpoints {
 
     pub remote_ip: IpAddr,
     pub remote_port: u16,
+}
+
+impl Display for SocketEndpoints {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}:{} -> {}:{}",
+            self.local_ip, self.local_port, self.remote_ip, self.remote_port,
+        )
+    }
 }
 
 /// A stream of network events.
@@ -56,7 +77,7 @@ impl Stream for PollNetwork {
 /// # use bpfx::network::ProtocolMask;
 /// let protocols = ProtocolMask::TCP | ProtocolMask::UDP;
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
 pub struct ProtocolMask(u8);
 
 impl ProtocolMask {
@@ -92,7 +113,7 @@ impl BitOrAssign for ProtocolMask {
 /// # use bpfx::network::NetworkMask;
 /// let mask = NetworkMask::CONNECT | NetworkMask::CLOSE;
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
 pub struct NetworkMask(u8);
 
 impl NetworkMask {
@@ -166,7 +187,7 @@ impl Default for NetworkFilter {
 /// Stores the active filter and the channel used to deliver events
 /// to the corresponding event stream.
 #[derive(Debug, Clone)]
-pub struct NetworkRegister {
+pub(crate) struct NetworkRegister {
     pub filter: NetworkFilter,
     pub tx: Sender<NetworkEvent>,
 }
@@ -219,6 +240,16 @@ pub struct ConnectEvent {
     pub retval: i32,
 }
 
+impl Display for ConnectEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} CONNECT {} -> {}",
+            self.header, self.protocol, self.endpoints, self.retval,
+        )
+    }
+}
+
 /// Emitted after the kernel accepts an incoming TCP connection.
 /// Generated from `inet_csk_accept()`.
 /// This event is only emitted for TCP.
@@ -229,6 +260,16 @@ pub struct AcceptEvent {
     pub endpoints: SocketEndpoints,
 }
 
+impl Display for AcceptEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} ACCEPT {}",
+            self.header, self.protocol, self.endpoints,
+        )
+    }
+}
+
 /// Emitted when the kernel closes a socket.
 /// Generated from `tcp_close()` for TCP sockets and
 /// `udp_destroy_sock()` for UDP sockets.
@@ -237,6 +278,16 @@ pub struct CloseEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
     pub endpoints: SocketEndpoints,
+}
+
+impl Display for CloseEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} CLOSE {}",
+            self.header, self.protocol, self.endpoints,
+        )
+    }
 }
 
 /// Emitted when the kernel completes binding a socket to a local address.
@@ -251,6 +302,16 @@ pub struct BindEvent {
     pub retval: i32,
 }
 
+impl Display for BindEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} BIND {} -> {}",
+            self.header, self.protocol, self.endpoints, self.retval,
+        )
+    }
+}
+
 /// Emitted when the kernel completes putting a socket into the listening state.
 /// Generated from the `inet_listen` fexit hook.
 /// This event is emitted immediately after the kernel finishes processing
@@ -263,6 +324,16 @@ pub struct ListenEvent {
     pub retval: i32,
 }
 
+impl Display for ListenEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} LISTEN {} -> {}",
+            self.header, self.protocol, self.endpoints, self.retval,
+        )
+    }
+}
+
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
@@ -271,6 +342,18 @@ pub enum NetworkEvent {
     Close(CloseEvent),
     Bind(BindEvent),
     Listen(ListenEvent),
+}
+
+impl Display for NetworkEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Connect(e) => e.fmt(f),
+            Self::Accept(e) => e.fmt(f),
+            Self::Close(e) => e.fmt(f),
+            Self::Bind(e) => e.fmt(f),
+            Self::Listen(e) => e.fmt(f),
+        }
+    }
 }
 
 impl NetworkEvent {

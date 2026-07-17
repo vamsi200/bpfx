@@ -9,14 +9,16 @@ use bpfx_common::raw::{
     FILE_BLK, FILE_CHR, FILE_DIR, FILE_FIFO, FILE_LNK, FILE_REG, FILE_SOCK, FileModeFilter,
     FilterKey,
 };
+use core::fmt;
 use futures::Stream;
+use std::fmt::Display;
 use std::{
     ops::{BitOr, BitOrAssign},
     time::Duration,
 };
 use tokio::sync::mpsc::Sender;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileType {
     Regular,
     Directory,
@@ -55,6 +57,16 @@ pub struct FileOpenEvent {
     pub retval: i32,
 }
 
+impl Display for FileOpenEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} OPEN {} -> {}",
+            self.header, self.filename, self.retval,
+        )
+    }
+}
+
 /// Emitted when the kernel closes an open file.
 /// Generated from the `filp_close` fexit hook.
 /// This event is emitted immediately after the kernel completes the file
@@ -65,6 +77,16 @@ pub struct FileCloseEvent {
     pub filename: String,
     pub file_type: FileType,
     pub retval: i32,
+}
+
+impl Display for FileCloseEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} CLOSE {} ({})",
+            self.header, self.filename, self.retval
+        )
+    }
 }
 
 /// Emitted when the kernel completes a file read operation.
@@ -79,6 +101,16 @@ pub struct FileReadEvent {
     pub retval: isize,
 }
 
+impl Display for FileReadEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} READ {} ({})",
+            self.header, self.filename, self.retval
+        )
+    }
+}
+
 /// Emitted when the kernel completes a file write operation.
 /// Generated from the `vfs_write` fexit hook.
 /// This event is emitted immediately after the kernel finishes processing
@@ -91,6 +123,16 @@ pub struct FileWriteEvent {
     pub retval: isize,
 }
 
+impl Display for FileWriteEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} WRITE {} ({})",
+            self.header, self.filename, self.retval
+        )
+    }
+}
+
 /// Emitted when the kernel unlinks a file from the filesystem.
 /// Generated from the `vfs_unlink` fexit hook.
 /// This event is emitted immediately after the kernel removes a directory
@@ -101,6 +143,16 @@ pub struct FileDeleteEvent {
     pub filename: String,
     pub file_type: FileType,
     pub retval: i32,
+}
+
+impl Display for FileDeleteEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} DELETE {} ({})",
+            self.header, self.filename, self.retval
+        )
+    }
 }
 
 /// Emitted when the kernel renames or moves a file.
@@ -116,6 +168,17 @@ pub struct FileRenameEvent {
     pub retval: i32,
 }
 
+impl Display for FileRenameEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} RENAME ({}) => ({}) ({})",
+            self.header, self.old_filename, self.new_filename, self.retval
+        )
+    }
+}
+
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum FileEvent {
     Open(FileOpenEvent),
@@ -235,7 +298,7 @@ impl Stream for PollFile {
 /// # use bpfx::file::FileMask;
 /// let mask = FileMask::OPEN | FileMask::WRITE | FileMask::DELETE;
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileMask(u8);
 
 impl FileMask {
@@ -257,6 +320,26 @@ impl FileMask {
 
     pub fn contains(&self, other: &Self) -> bool {
         self.0 & other.0 == other.0
+    }
+}
+
+impl std::fmt::Display for FileMask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if *self == FileMask::OPEN {
+            write!(f, "OPEN")
+        } else if *self == FileMask::READ {
+            write!(f, "READ")
+        } else if *self == FileMask::WRITE {
+            write!(f, "WRITE")
+        } else if *self == FileMask::RENAME {
+            write!(f, "RENAME")
+        } else if *self == FileMask::CLOSE {
+            write!(f, "CLOSE")
+        } else if *self == FileMask::DELETE {
+            write!(f, "DELETE")
+        } else {
+            write!(f, "{:?}", self)
+        }
     }
 }
 
@@ -315,7 +398,7 @@ impl Default for FileFilter {
 /// Stores the active filter and the channel used to deliver events
 /// to the corresponding event stream.
 #[derive(Debug)]
-pub struct FileRegister {
+pub(crate) struct FileRegister {
     pub filter: FileFilter,
     pub tx: Sender<FileEvent>,
 }

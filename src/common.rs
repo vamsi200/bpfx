@@ -1,7 +1,7 @@
 #![allow(unused)]
-use std::{net::IpAddr, time::Duration};
+use std::{fmt::Display, net::IpAddr, time::Duration};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProcessId {
     pub pid: u32,
     pub tid: u32,
@@ -20,6 +20,16 @@ pub struct EventHeader {
 
     /// Process Name
     pub comm: String,
+}
+
+impl Display for EventHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} pid={} tid={} ppid={} uid={} gid={} comm={}",
+            self.timestamp_ns, self.pid, self.tid, self.ppid, self.uid, self.gid, self.comm,
+        )
+    }
 }
 
 impl EventHeader {

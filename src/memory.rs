@@ -5,9 +5,10 @@ use crate::{
     core::{Subscription, attach_mem_probe},
 };
 use bpfx_common::raw::FilterKey;
+use core::fmt;
 use futures::Stream;
+use std::fmt::Display;
 use std::{
-    fmt::Debug,
     ops::{BitOr, BitOrAssign},
     time::Duration,
 };
@@ -27,6 +28,16 @@ pub struct MemoryMapEvent {
     pub mapped_address: usize,
 }
 
+impl Display for MemoryMapEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} MMAP addr={:#x} len={:#x} -> {:#x}",
+            self.header, self.requested_address, self.length, self.mapped_address,
+        )
+    }
+}
+
 /// Emitted when the kernel completes a virtual memory unmapping operation.
 /// Generated from the `__vm_munmap` fexit hook.
 /// This event is emitted immediately after the kernel finishes removing a
@@ -37,6 +48,16 @@ pub struct MemoryUnmapEvent {
     pub requested_address: usize,
     pub length: u64,
     pub mapped_address: usize,
+}
+
+impl Display for MemoryUnmapEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} MUNMAP addr={:#x} len={:#x}",
+            self.header, self.requested_address, self.length,
+        )
+    }
 }
 
 /// A stream of memory events.
@@ -60,10 +81,20 @@ impl Stream for PollMem {
     }
 }
 
-#[derive(Debug)]
+#[non_exhaustive]
+#[derive(Debug, Clone)]
 pub enum MemoryEvent {
     MemoryMap(MemoryMapEvent),
     MemoryUnMap(MemoryUnmapEvent),
+}
+
+impl Display for MemoryEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MemoryMap(e) => e.fmt(f),
+            Self::MemoryUnMap(e) => e.fmt(f),
+        }
+    }
 }
 
 impl MemoryEvent {
@@ -103,7 +134,7 @@ impl MemoryEvent {
 /// # use bpfx::memory::MemoryMask;
 /// let mask = MemoryMask::MMAP | MemoryMask::UNMAP;
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
 pub struct MemoryMask(u8);
 
 impl MemoryMask {
@@ -159,7 +190,7 @@ pub struct MemoryFilter {
 /// Stores the active filter and the channel used to deliver events
 /// to the corresponding event stream.
 #[derive(Debug)]
-pub struct MemRegister {
+pub(crate) struct MemRegister {
     pub filter: MemoryFilter,
     pub tx: Sender<MemoryEvent>,
 }

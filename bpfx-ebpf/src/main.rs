@@ -947,14 +947,39 @@ fn try_vfs_unlink(ctx: FExitContext) -> Result<i32, i32> {
 }
 
 #[fexit]
-pub fn vfs_rename(ctx: FExitContext) -> i32 {
+pub fn vfs_rename_retval(ctx: FExitContext) -> i32 {
+    match unsafe { try_vfs_rename_retval(ctx) } {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_vfs_rename_retval(ctx: FExitContext) -> Result<i32, i32> {
+    unsafe {
+        let mut events = match EVENTS.reserve::<RawFileRtrEvent>(0) {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        events.write(RawFileRtrEvent {
+            header: build_event_header(EventType::PendingFileRename),
+            retval: ctx.arg(1),
+        });
+
+        events.submit(0);
+    }
+    Ok(0)
+}
+
+#[fentry]
+pub fn vfs_rename(ctx: FEntryContext) -> i32 {
     match unsafe { try_vfs_rename(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
 }
 
-fn try_vfs_rename(ctx: FExitContext) -> Result<i32, i32> {
+fn try_vfs_rename(ctx: FEntryContext) -> Result<i32, i32> {
     unsafe {
         let header = build_event_header(EventType::FileRename);
 
@@ -985,7 +1010,6 @@ fn try_vfs_rename(ctx: FExitContext) -> Result<i32, i32> {
 
         event.header = header;
         event.file_mode = output.1;
-        event.retval = ctx.arg(1);
 
         bpf_probe_read_kernel_str(
             event.old_filename.as_mut_ptr() as *mut _,

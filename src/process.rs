@@ -6,6 +6,7 @@ use crate::{
 };
 use bpfx_common::raw::FilterKey;
 use futures::Stream;
+use std::fmt::Display;
 use std::{
     ops::{BitOr, BitOrAssign},
     time::Duration,
@@ -22,6 +23,12 @@ pub struct ProcessStartEvent {
     pub filename: String,
 }
 
+impl Display for ProcessStartEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} START {}", self.header, self.filename,)
+    }
+}
+
 /// Emitted when a process exits.
 /// Generated from `do_group_exit()`.
 /// The `exit_code` contains the raw kernel exit status.
@@ -29,6 +36,12 @@ pub struct ProcessStartEvent {
 pub struct ProcessExitEvent {
     pub header: EventHeader,
     pub exit_code: i32,
+}
+
+impl Display for ProcessExitEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} EXIT {}", self.header, self.status(),)
+    }
 }
 
 impl ProcessExitEvent {
@@ -48,11 +61,32 @@ pub struct ProcessForkEvent {
     pub child_comm: String,
 }
 
+impl Display for ProcessForkEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} FORK {}({})",
+            self.parent, self.child_comm, self.child_pid,
+        )
+    }
+}
+
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum ProcessEvent {
     Start(ProcessStartEvent),
     Fork(ProcessForkEvent),
     Exit(ProcessExitEvent),
+}
+
+impl Display for ProcessEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Start(e) => e.fmt(f),
+            Self::Fork(e) => e.fmt(f),
+            Self::Exit(e) => e.fmt(f),
+        }
+    }
 }
 
 impl ProcessEvent {
@@ -118,7 +152,7 @@ impl Stream for PollProcess {
 /// # use bpfx::network::ProcessMask;
 /// let mask = ProcessMask::START | ProcessMask::EXIT;
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProcessMask(u8);
 
 impl ProcessMask {
@@ -182,7 +216,7 @@ pub struct ProcessFilter {
 /// Stores the active filter and the channel used to deliver events
 /// to the corresponding event stream.
 #[derive(Debug)]
-pub struct ProcessRegister {
+pub(crate) struct ProcessRegister {
     pub filter: ProcessFilter,
     pub tx: Sender<ProcessEvent>,
 }

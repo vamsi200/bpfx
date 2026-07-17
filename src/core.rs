@@ -3,7 +3,8 @@ use crate::file::{
     FileCloseEvent, FileDeleteEvent, FileEvent, FileFilter, FileOpenEvent, FileReadEvent,
     FileRegister, FileRenameEvent, FileType, FileWriteEvent,
 };
-use crate::memory::{MemRegister, MemoryUnmapEvent};
+use crate::memory::MemRegister;
+use crate::memory::MemoryUnmapEvent;
 use crate::memory::{MemoryEvent, MemoryFilter, MemoryMapEvent, MemoryMask};
 use crate::network::{
     BindEvent, ListenEvent, NetworkFilter, NetworkRegister, Protocol, ProtocolMask,
@@ -24,22 +25,65 @@ use aya::{
 };
 use aya_log::EbpfLogger;
 use bpfx_common::raw::*;
+use std::collections::HashMap;
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     ptr,
 };
 use tokio::sync::mpsc::{self, error::TrySendError};
 
+const MAX_PENDING_RENAMES: usize = 1024;
+
+/// Entry point for bpfx.
+///
+/// `Bpfx` owns the loaded eBPF programs, kernel metadata, and the internal
+/// event loop used to deliver events to subscribers.
+///
+/// A typical workflow is:
+///
+/// 1. Construct a [`Bpfx`] instance with [`Bpfx::new`].
+/// 2. Register one or more subscriptions using [`Bpfx::subscribe`].
+/// 3. Start the event loop with [`Bpfx::run`].
+///
+/// # Example
+///
+/// ```no_run
+/// use bpfx::{
+///     process::ProcessFilter,
+///     Bpfx,
+/// };
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut bpfx = Bpfx::new()?;
+///
+/// let _events = bpfx.subscribe(ProcessFilter::ALL)?;
+///
+/// let runtime = bpfx.run();
+///
+/// runtime.await??;
+/// # Ok(())
+/// # }
+/// ```
 pub struct Bpfx {
-    pub bpf: Ebpf,
-    pub btf: Btf,
+    pub(crate) bpf: Ebpf,
+    pub(crate) btf: Btf,
     ringbuf: RingBuf<MapData>,
-    pub network: Option<NetworkRegister>,
-    pub process: Option<ProcessRegister>,
-    pub file: Option<FileRegister>,
-    pub mem: Option<MemRegister>,
+    pub(crate) network: Option<NetworkRegister>,
+    pub(crate) process: Option<ProcessRegister>,
+    pub(crate) file: Option<FileRegister>,
+    pub(crate) mem: Option<MemRegister>,
+    started: bool,
+    pending_renames: HashMap<(u32, u32), RawFileRenameEvent>,
 }
 
+/// A type that can register an event subscription with [`Bpfx`].
+///
+/// This trait is implemented by all filter types (for example,
+/// `ProcessFilter`, `FileFilter`, `MemoryFilter`, and `NetworkFilter`).
+///
+/// Users typically do not implement this trait directly. Instead, it is used
+/// by [`Bpfx::subscribe`] to create the corresponding event stream.
 pub trait Subscription {
     type Event;
     type Stream;
@@ -48,6 +92,21 @@ pub trait Subscription {
 }
 
 impl Bpfx {
+    /// Creates a new bpfx runtime.
+    ///
+    /// This loads the embedded eBPF object, initializes kernel BTF information,
+    /// and prepares the internal ring buffer used to receive events.
+    ///
+    /// The returned instance is inert until one or more subscriptions are
+    /// registered and [`Bpfx::run`] is called.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    ///
+    /// - the embedded eBPF object cannot be loaded,
+    /// - kernel BTF information is unavailable,
+    /// - the event ring buffer cannot be initialized.
     pub fn new() -> Result<Self> {
         env_logger::init();
 
@@ -72,6 +131,8 @@ impl Bpfx {
             process: None,
             file: None,
             mem: None,
+            started: false,
+            pending_renames: HashMap::with_capacity(1000),
         })
     }
 
@@ -82,6 +143,16 @@ impl Bpfx {
             || self.mem.as_ref().is_some_and(|r| !r.tx.is_closed())
     }
 
+    /// Registers a new event subscription.
+    ///
+    /// The supplied filter determines which events are monitored and returned
+    /// by the resulting event stream.
+    ///
+    /// Multiple subscriptions of different types may coexist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the required eBPF probes cannot be attached.
     pub fn subscribe<S>(&mut self, filter: S) -> Result<S::Stream>
     where
         S: Subscription,
@@ -90,11 +161,28 @@ impl Bpfx {
         filter.subscribe(self)
     }
 
-    pub fn run(self) -> tokio::task::JoinHandle<Result<()>> {
-        tokio::spawn(async move { self.run_boy().await })
+    /// Starts the bpfx event loop.
+    ///
+    /// This consumes the [`Bpfx`] instance and spawns a background Tokio task
+    /// that continuously receives kernel events and dispatches them to active
+    /// subscribers.
+    ///
+    /// The returned [`tokio::task::JoinHandle`] should typically be awaited to
+    /// observe any runtime errors.
+    ///
+    /// The event loop exits automatically when all subscriptions have been
+    /// dropped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside of a Tokio runtime.
+    #[must_use = "call .await on the returned JoinHandle or explicitly drop it"]
+    pub fn run(mut self) -> tokio::task::JoinHandle<Result<()>> {
+        self.started = true;
+        tokio::spawn(async move { self.event_loop().await })
     }
 
-    async fn run_boy(mut self) -> Result<()> {
+    async fn event_loop(mut self) -> Result<()> {
         loop {
             if !self.has_subscribers() {
                 break Err(crate::error::Error::NoActiveSubscriptions);
@@ -110,13 +198,21 @@ impl Bpfx {
                 }
 
                 if let Some(pr) = &self.file {
-                    convert_file_events(&pr.tx, &events)?;
+                    convert_file_events(&pr.tx, &events, &mut self.pending_renames)?;
                 }
 
                 if let Some(pr) = &self.mem {
                     convert_mem_events(&pr.tx, &events)?;
                 }
             }
+        }
+    }
+}
+
+impl Drop for Bpfx {
+    fn drop(&mut self) {
+        if !self.started {
+            log::warn!("Bpfx dropped without calling run()");
         }
     }
 }
@@ -441,7 +537,7 @@ fn handle_close(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) {
     }
 }
 
-pub fn attach_network_probe(
+pub(crate) fn attach_network_probe(
     filter: &NetworkFilter,
     bpf: &mut Ebpf,
     btf: &Btf,
@@ -563,7 +659,7 @@ pub fn convert_network_events(
     Ok(())
 }
 
-pub fn attach_process_probe(
+pub(crate) fn attach_process_probe(
     filter: &ProcessFilter,
     bpf: &mut Ebpf,
     btf: &Btf,
@@ -603,7 +699,7 @@ fn convert_header(header: RawEventHeader) -> EventHeader {
     }
 }
 
-pub fn convert_process_events(
+fn convert_process_events(
     producer: &mpsc::Sender<ProcessEvent>,
     events: &RingBufItem<'_>,
 ) -> crate::error::Result<()> {
@@ -696,7 +792,7 @@ fn write_to_map(bpf: &mut Ebpf, filter: &FileFilter) -> crate::error::Result<()>
     Ok(())
 }
 
-pub fn attach_file_probe(
+pub(crate) fn attach_file_probe(
     filter: &FileFilter,
     bpf: &mut Ebpf,
     btf: &Btf,
@@ -725,7 +821,8 @@ pub fn attach_file_probe(
     }
 
     if filter.event_type.contains(&FileMask::RENAME) {
-        attach_fexit(bpf, btf, "vfs_rename", "vfs_rename")?;
+        attach_fentry(bpf, btf, "vfs_rename", "vfs_rename")?;
+        attach_fexit(bpf, btf, "vfs_rename_retval", "vfs_rename")?;
     }
 
     Ok(())
@@ -734,6 +831,7 @@ pub fn attach_file_probe(
 fn convert_file_events(
     producer: &mpsc::Sender<FileEvent>,
     events: &RingBufItem<'_>,
+    pending_rename_map: &mut HashMap<(u32, u32), RawFileRenameEvent>,
 ) -> crate::error::Result<()> {
     let ptr = events.as_ptr();
     let header = unsafe { ptr::read(ptr as *const RawEventHeader) };
@@ -872,34 +970,62 @@ fn convert_file_events(
 
         EventType::FileRename => {
             let event = unsafe { ptr::read(ptr as *const RawFileRenameEvent) };
-            let old_path_len = event
-                .old_filename
-                .iter()
-                .position(|&x| x == 0)
-                .unwrap_or(event.old_filename.len());
+            let pid_tid = (event.header.pid, event.header.tid);
 
-            let new_path_len = event
-                .new_filename
-                .iter()
-                .position(|&x| x == 0)
-                .unwrap_or(event.new_filename.len());
+            if pending_rename_map.len() >= MAX_PENDING_RENAMES {
+                log::warn!(
+                    "pending rename map full ({} entries), dropping events",
+                    MAX_PENDING_RENAMES
+                );
+            } else {
+                match pending_rename_map.insert(pid_tid, event) {
+                    Some(old) => {
+                        log::warn!("replaced existing pending rename: {:?}", old);
+                    }
+                    None => {
+                        log::info!("inserted new pending rename");
+                    }
+                }
+            }
+        }
 
-            match producer.try_send(file_event!(
-                Rename,
-                FileRenameEvent,
-                convert_header(event.header),
-                String::from_utf8_lossy(&event.old_filename[..old_path_len]).into_owned(),
-                String::from_utf8_lossy(&event.new_filename[..new_path_len]).into_owned(),
-                FileType::from(event.file_mode),
-                event.retval
-            )) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    log::warn!("dropping file event: channel is full");
+        EventType::PendingFileRename => {
+            let ret_event = unsafe { ptr::read(ptr as *const RawFileRtrEvent) };
+
+            let pid_tid = (ret_event.header.pid, ret_event.header.tid);
+
+            if let Some(event) = pending_rename_map.remove(&pid_tid) {
+                let old_path_len = event
+                    .old_filename
+                    .iter()
+                    .position(|&x| x == 0)
+                    .unwrap_or(event.old_filename.len());
+
+                let new_path_len = event
+                    .new_filename
+                    .iter()
+                    .position(|&x| x == 0)
+                    .unwrap_or(event.new_filename.len());
+
+                match producer.try_send(file_event!(
+                    Rename,
+                    FileRenameEvent,
+                    convert_header(event.header),
+                    String::from_utf8_lossy(&event.old_filename[..old_path_len]).into_owned(),
+                    String::from_utf8_lossy(&event.new_filename[..new_path_len]).into_owned(),
+                    FileType::from(event.file_mode),
+                    ret_event.retval
+                )) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        log::warn!("dropping file event: channel is full");
+                    }
+                    Err(TrySendError::Closed(_)) => {
+                        log::warn!("dropping file event: receiver has been closed");
+                    }
                 }
-                Err(TrySendError::Closed(_)) => {
-                    log::warn!("dropping file event: receiver has been closed");
-                }
+            } else {
+                log::debug!("orphaned rename exit for {:?}", pid_tid);
             }
         }
 
@@ -939,7 +1065,7 @@ fn write_to_fiter_map(
     Ok(())
 }
 
-pub fn attach_mem_probe(
+pub(crate) fn attach_mem_probe(
     filter: &MemoryFilter,
     bpf: &mut Ebpf,
     btf: &Btf,

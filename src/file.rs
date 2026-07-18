@@ -156,9 +156,9 @@ impl Display for FileDeleteEvent {
 }
 
 /// Emitted when the kernel renames or moves a file.
-/// Generated from the `vfs_rename` fentry hook.
-/// This event is emitted immediately after the kernel performs the
-/// rename operation.
+/// Generated using the `vfs_rename` fentry and fexit hooks to capture both
+/// the operation metadata and its return value.
+/// This event is emitted after the kernel completes the rename operation.
 #[derive(Debug, Clone)]
 pub struct FileRenameEvent {
     pub header: EventHeader,

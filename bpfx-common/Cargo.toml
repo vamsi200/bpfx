@@ -5,7 +5,6 @@ edition = "2024"
 description = "Shared types for the bpfx eBPF observability library."
 license = "MIT"
 repository = "https://github.com/vamsi200/bpfx"
-publish = false
 
 [features]
 user = ["dep:aya"]

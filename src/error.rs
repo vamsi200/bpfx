@@ -1,7 +1,7 @@
-use thiserror;
+use thiserror::Error;
 
 #[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum Error {
     #[error(transparent)]
     Btf(#[from] aya::BtfError),
@@ -9,7 +9,7 @@ pub enum Error {
     #[error("failed to load eBPF program")]
     Load(#[from] aya::EbpfError),
 
-    #[error("failed to attach probe")]
+    #[error("failed to attach eBPF program")]
     Attach(#[from] aya::programs::ProgramError),
 
     #[error(transparent)]
@@ -24,21 +24,20 @@ pub enum Error {
     #[error("invalid filter")]
     InvalidFilter,
 
-    #[error("failed to get mutable reference to program")]
-    ProgramNotFound,
+    #[error("failed to retrieve eBPF program")]
+    ProgramAccess,
 
     #[error("no active event subscriptions remain")]
     NoActiveSubscriptions,
 
-    //Change the names of the maps.
-    #[error("failed to get mutable on FILTER ArrayMap")]
-    FilterNotFound,
+    #[error("failed to access FILTER map")]
+    FilterMapAccess,
 
-    #[error("failed to get mutable on CONFIG HashMap")]
-    ConfigNotFound,
+    #[error("failed to access CONFIG map")]
+    ConfigMapAccess,
 
-    #[error("failed to take EVENTS map")]
-    EventNotFound,
+    #[error("failed to access EVENTS ring buffer")]
+    EventsMapAccess,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

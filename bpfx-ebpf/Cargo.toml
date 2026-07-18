@@ -11,4 +11,5 @@ publish = false
 aya-ebpf = "0.1.1"
 aya-ebpf-macros = "0.1.2"
 aya-log-ebpf = "0.1.0"
-bpfx-common = { path = "../bpfx-common/", default-features = false }
+bpfx-common = { version = "0.1.0", path = "../bpfx-common", default-features = false}
+

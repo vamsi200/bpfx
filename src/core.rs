@@ -23,7 +23,6 @@ use aya::{
     maps::RingBuf,
     programs::{FEntry, FExit, KProbe},
 };
-use aya_log::EbpfLogger;
 use bpfx_common::raw::*;
 use std::collections::HashMap;
 use std::{
@@ -33,8 +32,23 @@ use std::{
 use tokio::sync::mpsc::{self, error::TrySendError};
 const MAX_PENDING_RENAMES: usize = 1024;
 
+/// Configuration options for a [`Bpfx`] runtime.
+///
+/// Use [`Bpfx::with_config`] to create a runtime with custom settings.
+#[non_exhaustive]
 pub struct BpfxConfig {
+    /// Capacity of the per-subscription event channel.
+    ///
+    /// The default value used by [`Bpfx::new`] is `1024`.
     pub channel_capacity: usize,
+}
+
+impl Default for BpfxConfig {
+    fn default() -> Self {
+        Self {
+            channel_capacity: 1024,
+        }
+    }
 }
 
 /// Entry point for bpfx.
@@ -118,15 +132,10 @@ impl Bpfx {
         log::debug!("loading kernel BTF");
         let btf = Btf::from_sys_fs()?;
 
-        match EbpfLogger::init(&mut bpf) {
-            Ok(_) => log::debug!("initialized eBPF logger"),
-            Err(e) => log::debug!("failed to initialize eBPF logger: {e}"),
-        }
-
         log::debug!("retrieving EVENTS ring buffer map");
         let events = bpf
             .take_map("EVENTS")
-            .ok_or_else(|| crate::error::Error::EventNotFound)?;
+            .ok_or_else(|| crate::error::Error::EventsMapAccess)?;
 
         log::debug!("creating ring buffer");
         let ringbuf = RingBuf::try_from(events)?;
@@ -149,6 +158,28 @@ impl Bpfx {
         })
     }
 
+    /// Creates a new bpfx runtime using the provided configuration.
+    ///
+    /// This loads the embedded eBPF object, initializes kernel BTF information,
+    /// and prepares the internal ring buffer used to receive events.
+    ///
+    /// The provided [`BpfxConfig`] controls runtime behavior such as the event
+    /// channel capacity used for subscriptions.
+    ///
+    /// The returned instance is inert until one or more subscriptions are
+    /// registered and [`Bpfx::run`] is called.
+    ///
+    /// # Parameters
+    ///
+    /// - `config` - Runtime configuration for the bpfx instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    ///
+    /// - the embedded eBPF object cannot be loaded,
+    /// - kernel BTF information is unavailable,
+    /// - the event ring buffer cannot be initialized.
     pub fn with_config(config: BpfxConfig) -> Result<Self> {
         log::info!("loading eBPF object");
         let mut bpf = Ebpf::load(include_bytes_aligned!(env!("BPFX_EBPF")))?;
@@ -156,15 +187,10 @@ impl Bpfx {
         log::debug!("loading kernel BTF");
         let btf = Btf::from_sys_fs()?;
 
-        match EbpfLogger::init(&mut bpf) {
-            Ok(_) => log::debug!("initialized eBPF logger"),
-            Err(e) => log::debug!("failed to initialize eBPF logger: {e}"),
-        }
-
         log::debug!("retrieving EVENTS ring buffer map");
         let events = bpf
             .take_map("EVENTS")
-            .ok_or_else(|| crate::error::Error::EventNotFound)?;
+            .ok_or_else(|| crate::error::Error::EventsMapAccess)?;
 
         log::debug!("creating ring buffer");
         let ringbuf = RingBuf::try_from(events)?;
@@ -433,7 +459,7 @@ fn attach_fexit(
     log::info!("attaching fexit probe '{}' to '{}'", prog_name, func_name);
     let prog: &mut FExit = bpf
         .program_mut(prog_name)
-        .ok_or(crate::error::Error::ProgramNotFound)?
+        .ok_or(crate::error::Error::ProgramAccess)?
         .try_into()?;
 
     prog.load(func_name, btf)?;
@@ -450,7 +476,7 @@ fn attach_kprobe(
 
     let prog: &mut KProbe = bpf
         .program_mut(prog_name)
-        .ok_or(crate::error::Error::ProgramNotFound)?
+        .ok_or(crate::error::Error::ProgramAccess)?
         .try_into()?;
 
     prog.load()?;
@@ -468,7 +494,7 @@ fn attach_fentry(
 
     let prog: &mut FEntry = bpf
         .program_mut(prog_name)
-        .ok_or(crate::error::Error::ProgramNotFound)?
+        .ok_or(crate::error::Error::ProgramAccess)?
         .try_into()?;
 
     prog.load(symbol, btf)?;
@@ -490,7 +516,7 @@ fn attach_tracepoint(
 
     let prog: &mut TracePoint = bpf
         .program_mut(prog_name)
-        .ok_or(crate::error::Error::ProgramNotFound)?
+        .ok_or(crate::error::Error::ProgramAccess)?
         .try_into()?;
 
     prog.load()?;
@@ -853,7 +879,7 @@ fn write_to_map(bpf: &mut Ebpf, filter: &FileFilter) -> crate::error::Result<()>
 
     let mut config: HashMap<_, u32, FileModeFilter> = HashMap::try_from(
         bpf.map_mut("CONFIG")
-            .ok_or(crate::error::Error::ConfigNotFound)?,
+            .ok_or(crate::error::Error::ConfigMapAccess)?,
     )?;
 
     config.insert(0, FileModeFilter::from(filter.file_mode.clone()), 0)?;
@@ -1122,7 +1148,7 @@ fn write_to_fiter_map(
 
     let mut filter: HashMap<_, u32, FilterKey> = HashMap::try_from(
         bpf.map_mut("FILTER")
-            .ok_or(crate::error::Error::FilterNotFound)?,
+            .ok_or(crate::error::Error::FilterMapAccess)?,
     )?;
 
     let filter_type = match filter_type {

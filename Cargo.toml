@@ -2,7 +2,6 @@
 name = "bpfx"
 version = "0.1.0"
 edition = "2024"
-build = "build.rs"
 description = "A high-level Rust library for eBPF-based observability."
 readme = "README.md"
 license = "MIT"

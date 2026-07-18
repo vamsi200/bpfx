@@ -1,37 +1,26 @@
 #![no_main]
 #![no_std]
-#![allow(unused)]
 #![allow(non_camel_case_types)]
 
 pub mod bindings;
-use crate::bindings::tcp_ca_event::CA_EVENT_ECN_IS_CE;
-use crate::bindings::{dentry, file, in6_addr, inode, path, renamedata, sockaddr, user_namespace};
+
+use crate::bindings::{dentry, file, in6_addr, inode, renamedata};
 use crate::bindings::{sock, socket, task_struct};
-use aya_ebpf::bindings::bpf_core_relo_kind::BPF_CORE_FIELD_BYTE_OFFSET;
-use aya_ebpf::cty::c_char;
 use aya_ebpf::helpers::r#gen::{
-    bpf_d_path, bpf_get_current_task_btf, bpf_ktime_get_ns, bpf_probe_read_kernel_str,
-    bpf_probe_read_str, bpf_probe_read_user_str,
+    bpf_get_current_task_btf, bpf_ktime_get_ns, bpf_probe_read_kernel_str,
 };
 use aya_ebpf::helpers::{
     bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_probe_read_kernel,
-    bpf_probe_read_user, bpf_probe_read_user_str_bytes,
 };
-use aya_ebpf::macros::{lsm, tracepoint};
-use aya_ebpf::maps::ring_buf::RingBufEntry;
-use aya_ebpf::maps::{Array, HashMap, PerCpuArray, RingBuf};
-use aya_ebpf::programs::{FEntryContext, LsmContext, TracePointContext};
+use aya_ebpf::macros::tracepoint;
+use aya_ebpf::maps::{HashMap, PerCpuArray, RingBuf};
+use aya_ebpf::programs::{FEntryContext, TracePointContext};
 use aya_ebpf::programs::{FExitContext, RetProbeContext};
-use aya_ebpf::programs::{fentry, tracepoint};
 use aya_ebpf::{EbpfContext, TASK_COMM_LEN};
 use aya_ebpf_macros::{fentry, map};
 use aya_ebpf_macros::{fexit, kretprobe};
-use aya_log_ebpf::info;
 use bpfx_common::raw::*;
 use bpfx_common::raw::{IpVersion, RawProtocol};
-use core::ffi::c_int;
-use core::panic::PanicInfo;
-use core::ptr::null;
 
 const AF_INET: u16 = 2;
 const AF_INET6: u16 = 10;
@@ -85,7 +74,6 @@ fn collect_process_ctx() -> (u64, u32, u32, u32, u32, u32, [u8; TASK_COMM_LEN]) 
             bpf_probe_read_kernel(&(*parent_ptr).tgid).unwrap_or(0) as u32
         };
 
-        let ppid = bpf_probe_read_kernel(&(*parent_ptr).tgid).unwrap_or(0) as u32;
         let comm = bpf_get_current_comm().unwrap_or([0u8; TASK_COMM_LEN]);
         (timestamp, pid, tid, ppid, uid, gid, comm)
     }
@@ -93,18 +81,16 @@ fn collect_process_ctx() -> (u64, u32, u32, u32, u32, u32, [u8; TASK_COMM_LEN]) 
 
 #[inline(always)]
 fn build_event_header(event_type: EventType) -> RawEventHeader {
-    unsafe {
-        let (timestamp, pid, tid, ppid, uid, gid, comm) = collect_process_ctx();
-        RawEventHeader {
-            event_type,
-            timestamp_ns: timestamp,
-            pid,
-            tid,
-            ppid,
-            uid,
-            gid,
-            comm,
-        }
+    let (timestamp, pid, tid, ppid, uid, gid, comm) = collect_process_ctx();
+    RawEventHeader {
+        event_type,
+        timestamp_ns: timestamp,
+        pid,
+        tid,
+        ppid,
+        uid,
+        gid,
+        comm,
     }
 }
 
@@ -171,39 +157,37 @@ fn emit_v4(
     protocol: u8,
     event_type: EventType,
 ) -> Result<i32, i32> {
-    unsafe {
-        let mut event = match EVENTS.reserve::<PendingConnect>(0) {
-            Some(e) => e,
-            None => return Ok(0),
-        };
+    let mut event = match EVENTS.reserve::<PendingConnect>(0) {
+        Some(e) => e,
+        None => return Ok(0),
+    };
 
-        let header = build_event_header(event_type);
-        if filter_events(FilterOwner::Network, &header) {
-            event.discard(0);
-            return Ok(0);
-        }
-
-        let tid = bpf_get_current_pid_tgid() as u32;
-
-        let mut dst_addr = [0u8; 16];
-        dst_addr[..4].copy_from_slice(&sock_daddr(sock).to_ne_bytes());
-        let mut src_addr = [0u8; 16];
-        src_addr[..4].copy_from_slice(&sock_rcv_saddr(sock).to_ne_bytes());
-
-        event.write(PendingConnect {
-            header,
-            protocol: RawProtocol::try_from(protocol).unwrap(), // unwrap is fine here.
-            tid,
-            src_port: sock_num(sock),
-            dst_port: sock_dport(sock),
-            ip_version: IpVersion::V4,
-            src_addr,
-            dst_addr,
-            retval,
-        });
-
-        event.submit(0);
+    let header = build_event_header(event_type);
+    if filter_events(FilterOwner::Network, &header) {
+        event.discard(0);
+        return Ok(0);
     }
+
+    let tid = bpf_get_current_pid_tgid() as u32;
+
+    let mut dst_addr = [0u8; 16];
+    dst_addr[..4].copy_from_slice(&sock_daddr(sock).to_ne_bytes());
+    let mut src_addr = [0u8; 16];
+    src_addr[..4].copy_from_slice(&sock_rcv_saddr(sock).to_ne_bytes());
+
+    event.write(PendingConnect {
+        header,
+        protocol: RawProtocol::try_from(protocol).unwrap(), // unwrap is fine here.
+        tid,
+        src_port: sock_num(sock),
+        dst_port: sock_dport(sock),
+        ip_version: IpVersion::V4,
+        src_addr,
+        dst_addr,
+        retval,
+    });
+
+    event.submit(0);
     Ok(0)
 }
 
@@ -228,18 +212,15 @@ fn emit_v6(
 
         let tid = bpf_get_current_pid_tgid() as u32;
 
-        let daddr = match read_v6_addr(sock, core::ptr::addr_of!((*sock).__sk_common.skc_v6_daddr))
-        {
+        let daddr = match read_v6_addr(core::ptr::addr_of!((*sock).__sk_common.skc_v6_daddr)) {
             Ok(a) => a,
             Err(_) => {
                 event.discard(0);
                 return Ok(0);
             }
         };
-        let src_addr = match read_v6_addr(
-            sock,
-            core::ptr::addr_of!((*sock).__sk_common.skc_v6_rcv_saddr),
-        ) {
+        let src_addr = match read_v6_addr(core::ptr::addr_of!((*sock).__sk_common.skc_v6_rcv_saddr))
+        {
             Ok(a) => a,
             Err(_) => {
                 event.discard(0);
@@ -267,9 +248,9 @@ fn emit_v6(
 //ConnectEvent for TCP and UDP - v4
 #[fexit]
 pub fn tcp_v4_connect(ctx: FExitContext) -> i32 {
-    match unsafe { try_tcp_v4_connect(ctx) } {
+    match { try_tcp_v4_connect(ctx) } {
         Ok(v) => v,
-        Err(e) => 0,
+        Err(_) => 0,
     }
 }
 
@@ -279,7 +260,7 @@ fn try_tcp_v4_connect(ctx: FExitContext) -> Result<i32, i32> {
         if sock.is_null() {
             return Ok(0);
         }
-        emit_v4(sock, Some(ctx.arg(3)), 1, EventType::Connect);
+        emit_v4(sock, Some(ctx.arg(3)), 1, EventType::Connect)?;
     }
     Ok(0)
 }
@@ -287,9 +268,9 @@ fn try_tcp_v4_connect(ctx: FExitContext) -> Result<i32, i32> {
 // AcceptEvent for TCP(Only)
 #[kretprobe]
 pub fn inet_csk_accept(ctx: RetProbeContext) -> i32 {
-    match unsafe { try_inet_csk_accept_impl(ctx) } {
+    match { try_inet_csk_accept_impl(ctx) } {
         Ok(v) => v,
-        Err(e) => 0,
+        Err(_) => 0,
     }
 }
 
@@ -310,7 +291,7 @@ fn try_inet_csk_accept_impl(ctx: RetProbeContext) -> Result<i32, i32> {
 
         let family = match bpf_probe_read_kernel::<u16>(&(*sock).__sk_common.skc_family) {
             Ok(val) => val,
-            Err(e) => {
+            Err(_) => {
                 return Ok(0);
             }
         };
@@ -329,67 +310,64 @@ fn try_inet_csk_accept_impl(ctx: RetProbeContext) -> Result<i32, i32> {
 // CloseEvent for TCP - v4 and v6
 #[fexit]
 pub fn tcp_close(ctx: FExitContext) -> i32 {
-    match unsafe { try_tcp_close(ctx) } {
+    match { try_tcp_close(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
 }
 
 fn try_tcp_close(ctx: FExitContext) -> Result<i32, i32> {
-    unsafe {
-        let sock: *const sock = unsafe { ctx.arg(0) };
-        let family = match bpf_probe_read_kernel::<u16>(&(*sock).__sk_common.skc_family) {
-            Ok(val) => val,
-            Err(e) => {
-                return Ok(0);
-            }
-        };
+    let sock: *const sock = unsafe { ctx.arg(0) };
+    let family = match unsafe { bpf_probe_read_kernel::<u16>(&(*sock).__sk_common.skc_family) } {
+        Ok(val) => val,
+        Err(_) => {
+            return Ok(0);
+        }
+    };
 
-        match family {
-            AF_INET => emit_v4(sock, None, 1, EventType::Close)?,
-            AF_INET6 => emit_v6(sock, None, 1, EventType::Close)?,
-            _ => return Ok(0),
-        };
-    }
+    match family {
+        AF_INET => emit_v4(sock, None, 1, EventType::Close)?,
+        AF_INET6 => emit_v6(sock, None, 1, EventType::Close)?,
+        _ => return Ok(0),
+    };
+
     Ok(0)
 }
 
 #[fexit]
 pub fn udp_destroy_sock(ctx: FExitContext) -> i32 {
-    match unsafe { try_udp_destroy_sock(ctx) } {
+    match { try_udp_destroy_sock(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
 }
 
 fn try_udp_destroy_sock(ctx: FExitContext) -> Result<i32, i32> {
-    unsafe {
-        let sock: *const sock = unsafe { ctx.arg(0) };
-        if sock.is_null() {
+    let sock: *const sock = unsafe { ctx.arg(0) };
+    if sock.is_null() {
+        return Ok(0);
+    }
+    let family = match unsafe { bpf_probe_read_kernel::<u16>(&(*sock).__sk_common.skc_family) } {
+        Ok(val) => val,
+        Err(_) => {
             return Ok(0);
         }
-        let family = match bpf_probe_read_kernel::<u16>(&(*sock).__sk_common.skc_family) {
-            Ok(val) => val,
-            Err(e) => {
-                return Ok(0);
-            }
-        };
+    };
 
-        match family {
-            AF_INET => emit_v4(sock, None, 2, EventType::Close)?,
-            AF_INET6 => emit_v6(sock, None, 2, EventType::Close)?,
-            _ => return Ok(0),
-        };
-    }
+    match family {
+        AF_INET => emit_v4(sock, None, 2, EventType::Close)?,
+        AF_INET6 => emit_v6(sock, None, 2, EventType::Close)?,
+        _ => return Ok(0),
+    };
     Ok(0)
 }
 
 //ConnectEvent for TCP and UDP - v6
 #[fexit]
 pub fn tcp_v6_connect(ctx: FExitContext) -> i32 {
-    match unsafe { try_tcp_v6_connect(ctx) } {
+    match { try_tcp_v6_connect(ctx) } {
         Ok(v) => v,
-        Err(e) => 0,
+        Err(_) => 0,
     }
 }
 
@@ -404,7 +382,7 @@ fn try_tcp_v6_connect(ctx: FExitContext) -> Result<i32, i32> {
 }
 
 #[inline(always)]
-fn read_v6_addr(sock: *const sock, field_ptr: *const in6_addr) -> Result<[u8; 16], i32> {
+fn read_v6_addr(field_ptr: *const in6_addr) -> Result<[u8; 16], i32> {
     unsafe {
         match bpf_probe_read_kernel(field_ptr) {
             Ok(i) => Ok(i.in6_u.u6_addr8),
@@ -415,7 +393,7 @@ fn read_v6_addr(sock: *const sock, field_ptr: *const in6_addr) -> Result<[u8; 16
 
 #[fexit]
 pub fn udp_connect(ctx: FExitContext) -> i32 {
-    match unsafe { try_udp_connect(ctx) } {
+    match { try_udp_connect(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
@@ -427,14 +405,14 @@ fn try_udp_connect(ctx: FExitContext) -> Result<i32, i32> {
         if sock.is_null() {
             return Ok(0);
         }
-        emit_v4(sock, Some(ctx.arg(3)), 2, EventType::Connect);
+        emit_v4(sock, Some(ctx.arg(3)), 2, EventType::Connect)?;
     }
     Ok(0)
 }
 
 #[fexit]
 pub fn udpv6_connect(ctx: FExitContext) -> i32 {
-    match unsafe { try_udpv6_connect(ctx) } {
+    match { try_udpv6_connect(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
@@ -452,7 +430,7 @@ fn try_udpv6_connect(ctx: FExitContext) -> Result<i32, i32> {
 
 #[tracepoint]
 pub fn sched_process_exec(ctx: TracePointContext) -> i32 {
-    match unsafe { try_sched_process_exec(ctx) } {
+    match { try_sched_process_exec(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
@@ -503,7 +481,7 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<i32, i32> {
 
 #[fentry]
 fn do_group_exit(ctx: FEntryContext) -> i32 {
-    match unsafe { try_do_group_exit(ctx) } {
+    match { try_do_group_exit(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
@@ -544,7 +522,7 @@ fn try_do_group_exit(ctx: FEntryContext) -> Result<i32, i32> {
 
 #[fexit]
 fn vfs_open(ctx: FExitContext) -> i32 {
-    match unsafe { try_vfs_open(ctx) } {
+    match { try_vfs_open(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
@@ -664,7 +642,7 @@ pub fn try_flip_close(ctx: FExitContext) -> Result<i32, i32> {
 
 #[tracepoint]
 pub fn sched_process_fork(ctx: TracePointContext) -> i32 {
-    match unsafe { try_sched_process_fork(ctx) } {
+    match { try_sched_process_fork(ctx) } {
         Ok(e) => e,
         Err(_) => 0,
     }
@@ -723,7 +701,7 @@ fn try_sched_process_fork(ctx: TracePointContext) -> Result<i32, i32> {
 
 #[fexit]
 pub fn vfs_read(ctx: FExitContext) -> i32 {
-    match unsafe { try_vfs_read(ctx) } {
+    match { try_vfs_read(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
@@ -814,7 +792,7 @@ fn try_vfs_read(ctx: FExitContext) -> Result<i32, i32> {
 
 #[fexit]
 pub fn vfs_write(ctx: FExitContext) -> i32 {
-    match unsafe { try_vfs_write(ctx) } {
+    match { try_vfs_write(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
@@ -896,7 +874,7 @@ fn capture_inode(inode: *const inode) -> (bool, FileModeFilter) {
 
 #[fexit]
 pub fn vfs_unlink(ctx: FExitContext) -> i32 {
-    match unsafe { try_vfs_unlink(ctx) } {
+    match { try_vfs_unlink(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
@@ -948,7 +926,7 @@ fn try_vfs_unlink(ctx: FExitContext) -> Result<i32, i32> {
 
 #[fexit]
 pub fn vfs_rename_retval(ctx: FExitContext) -> i32 {
-    match unsafe { try_vfs_rename_retval(ctx) } {
+    match { try_vfs_rename_retval(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
@@ -973,7 +951,7 @@ fn try_vfs_rename_retval(ctx: FExitContext) -> Result<i32, i32> {
 
 #[fentry]
 pub fn vfs_rename(ctx: FEntryContext) -> i32 {
-    match unsafe { try_vfs_rename(ctx) } {
+    match { try_vfs_rename(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
@@ -992,7 +970,6 @@ fn try_vfs_rename(ctx: FEntryContext) -> Result<i32, i32> {
         let new_dentry = (*renamedata).new_dentry;
 
         let old_inode = (*old_dentry).d_inode;
-        let new_inode = (*new_dentry).d_inode;
 
         let output = capture_inode(old_inode);
 
@@ -1037,7 +1014,7 @@ fn try_vfs_rename(ctx: FEntryContext) -> Result<i32, i32> {
 
 #[fexit]
 pub fn inet_bind(ctx: FExitContext) -> i32 {
-    match unsafe { try_inet_bind(ctx) } {
+    match { try_inet_bind(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
@@ -1054,14 +1031,14 @@ fn try_inet_bind(ctx: FExitContext) -> Result<i32, i32> {
 
         let family = match bpf_probe_read_kernel::<u16>(&(*sock).__sk_common.skc_family) {
             Ok(val) => val,
-            Err(e) => {
+            Err(_) => {
                 return Ok(0);
             }
         };
 
         match family {
-            AF_INET => emit_v4(sock, Some(ctx.arg(3)), 1, EventType::Bind),
-            AF_INET6 => emit_v6(sock, Some(ctx.arg(3)), 1, EventType::Bind),
+            AF_INET => emit_v4(sock, Some(ctx.arg(3)), 1, EventType::Bind)?,
+            AF_INET6 => emit_v6(sock, Some(ctx.arg(3)), 1, EventType::Bind)?,
             _ => {
                 return Ok(0);
             }
@@ -1072,7 +1049,7 @@ fn try_inet_bind(ctx: FExitContext) -> Result<i32, i32> {
 
 #[fexit]
 pub fn inet_listen(ctx: FExitContext) -> i32 {
-    match unsafe { try_inet_listen(ctx) } {
+    match { try_inet_listen(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
@@ -1089,14 +1066,14 @@ fn try_inet_listen(ctx: FExitContext) -> Result<i32, i32> {
 
         let family = match bpf_probe_read_kernel::<u16>(&(*sock).__sk_common.skc_family) {
             Ok(val) => val,
-            Err(e) => {
+            Err(_) => {
                 return Ok(0);
             }
         };
 
         match family {
-            AF_INET => emit_v4(sock, Some(ctx.arg(2)), 1, EventType::Listen),
-            AF_INET6 => emit_v6(sock, Some(ctx.arg(2)), 1, EventType::Listen),
+            AF_INET => emit_v4(sock, Some(ctx.arg(2)), 1, EventType::Listen)?,
+            AF_INET6 => emit_v6(sock, Some(ctx.arg(2)), 1, EventType::Listen)?,
             _ => {
                 return Ok(0);
             }
@@ -1148,7 +1125,7 @@ fn filter_events(filter_owner: FilterOwner, header: &RawEventHeader) -> bool {
 
 #[fexit]
 pub fn vm_mmap_pgoff(ctx: FExitContext) -> i32 {
-    match unsafe { try_vm_mmap_pgoff(ctx) } {
+    match { try_vm_mmap_pgoff(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
@@ -1185,7 +1162,7 @@ fn try_vm_mmap_pgoff(ctx: FExitContext) -> Result<i32, i32> {
 
 #[fexit]
 pub fn __vm_munmap(ctx: FExitContext) -> i32 {
-    match unsafe { try_vm_munmap(ctx) } {
+    match { try_vm_munmap(ctx) } {
         Ok(v) => v,
         Err(_) => 0,
     }
@@ -1210,6 +1187,8 @@ fn try_vm_munmap(ctx: FExitContext) -> Result<i32, i32> {
 
     Ok(0)
 }
+
+use core::panic::PanicInfo;
 
 #[cfg(not(test))]
 #[panic_handler]

@@ -3,6 +3,12 @@ name = "bpfx"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
+description = "A high-level Rust library for eBPF-based observability."
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/vamsi200/bpfx"
+keywords = ["ebpf", "linux", "observability"]
+categories = ["development-tools", "api-bindings"]
 
 [dependencies]
 aya-ebpf = "0.1.1"
@@ -10,7 +16,12 @@ aya-ebpf-macros = "0.1.2"
 aya-log-ebpf = "0.1.0"
 aya = "0.13.1"
 bpfx-common = {path = "./bpfx-common/", features = ["user"]}
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "signal", "full"] }
+tokio = { version = "1.52.3", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "signal",
+] }
 env_logger = "0.11.11"
 aya-log = "0.2.1"
 futures = "0.3.32"
@@ -26,9 +37,3 @@ members = [
 
 resolver = "3"
 
-# keywords = [
-#     "ebpf",
-#     "linux",
-#     "tracing",
-# ]
-# readme = "README.md"

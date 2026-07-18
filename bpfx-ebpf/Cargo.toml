@@ -2,9 +2,13 @@
 name = "bpfx-ebpf"
 version = "0.1.0"
 edition = "2024"
+description = "Internal eBPF programs for the bpfx observability library."
+license = "MIT"
+repository = "https://github.com/vamsi200/bpfx"
+publish = false
 
 [dependencies]
 aya-ebpf = "0.1.1"
 aya-ebpf-macros = "0.1.2"
 aya-log-ebpf = "0.1.0"
-bpfx-common = {path = "../bpfx-common/", default-features = false}
+bpfx-common = { path = "../bpfx-common/", default-features = false }

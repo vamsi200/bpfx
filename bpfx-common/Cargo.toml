@@ -2,9 +2,13 @@
 name = "bpfx-common"
 version = "0.1.0"
 edition = "2024"
+description = "Shared types for the bpfx eBPF observability library."
+license = "MIT"
+repository = "https://github.com/vamsi200/bpfx"
+publish = false
 
 [features]
 user = ["dep:aya"]
 
 [dependencies]
-aya = { version = "0.13.1", optional = true}
+aya = { version = "0.13.1", optional = true }

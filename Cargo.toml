@@ -10,6 +10,18 @@ repository = "https://github.com/vamsi200/bpfx"
 keywords = ["ebpf", "linux", "observability"]
 categories = ["development-tools", "api-bindings"]
 
+
+include = [
+    "/src/**",
+    "/examples/**",
+    "/bpfx-ebpf/**",
+    "/build.rs",
+    "/LICENSE",
+    "/README.md",
+    "/Cargo.toml",
+]
+
+
 [dependencies]
 aya = "0.13.1"
 bpfx-common = { version = "0.1.0", path = "./bpfx-common", features = ["user"] }
@@ -31,4 +43,3 @@ members = [
 ]
 
 resolver = "3"
-

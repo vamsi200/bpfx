@@ -127,7 +127,7 @@ impl Bpfx {
     /// - the event ring buffer cannot be initialized.
     pub fn new() -> Result<Self> {
         log::info!("loading eBPF object");
-        let mut bpf = Ebpf::load(include_bytes_aligned!(env!("BPFX_EBPF")))?;
+        let mut bpf = Ebpf::load(include_bytes_aligned!("../assets/bpfx-ebpf.o"))?;
 
         log::debug!("loading kernel BTF");
         let btf = Btf::from_sys_fs()?;
@@ -182,7 +182,7 @@ impl Bpfx {
     /// - the event ring buffer cannot be initialized.
     pub fn with_config(config: BpfxConfig) -> Result<Self> {
         log::info!("loading eBPF object");
-        let mut bpf = Ebpf::load(include_bytes_aligned!(env!("BPFX_EBPF")))?;
+        let mut bpf = Ebpf::load(include_bytes_aligned!("../assets/bpfx-ebpf.o"))?;
 
         log::debug!("loading kernel BTF");
         let btf = Btf::from_sys_fs()?;

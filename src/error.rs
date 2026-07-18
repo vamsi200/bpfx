@@ -1,5 +1,6 @@
 use thiserror;
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]

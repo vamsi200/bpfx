@@ -71,6 +71,16 @@ impl Display for ProcessForkEvent {
     }
 }
 
+/// A process lifecycle event.
+///
+/// This enum groups all process-related events emitted by bpfx, including
+/// process creation, program execution, and process termination.
+///
+/// Use pattern matching or the provided helper methods to inspect the
+/// underlying event.
+///
+/// This enum is marked as `non_exhaustive` and may gain additional variants
+/// in future releases.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum ProcessEvent {
@@ -226,7 +236,7 @@ impl Subscription for ProcessFilter {
     type Stream = PollProcess;
 
     fn subscribe(self, bpfx: &mut Bpfx) -> Result<Self::Stream> {
-        let (tx, rx) = tokio::sync::mpsc::channel::<ProcessEvent>(1024);
+        let (tx, rx) = tokio::sync::mpsc::channel::<ProcessEvent>(bpfx.config.channel_capacity);
         let pr = ProcessRegister { filter: self, tx };
         attach_process_probe(&pr.filter, &mut bpfx.bpf, &bpfx.btf)?;
         bpfx.process = Some(pr);

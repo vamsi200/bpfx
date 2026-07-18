@@ -6,7 +6,7 @@ pub mod memory;
 pub mod network;
 pub mod process;
 pub use common::{EventHeader, ProcessId};
-pub use core::Bpfx;
+pub use core::{Bpfx, BpfxConfig};
 
 // File
 pub use file::{FileEvent, FileFilter, FileMask, FileType, FileTypeFilter, PollFile};

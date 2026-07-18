@@ -31,8 +31,11 @@ use std::{
     ptr,
 };
 use tokio::sync::mpsc::{self, error::TrySendError};
-
 const MAX_PENDING_RENAMES: usize = 1024;
+
+pub struct BpfxConfig {
+    pub channel_capacity: usize,
+}
 
 /// Entry point for bpfx.
 ///
@@ -75,6 +78,7 @@ pub struct Bpfx {
     pub(crate) mem: Option<MemRegister>,
     started: bool,
     pending_renames: HashMap<(u32, u32), RawFileRenameEvent>,
+    pub config: BpfxConfig,
 }
 
 /// A type that can register an event subscription with [`Bpfx`].
@@ -108,21 +112,27 @@ impl Bpfx {
     /// - kernel BTF information is unavailable,
     /// - the event ring buffer cannot be initialized.
     pub fn new() -> Result<Self> {
-        env_logger::init();
-
+        log::info!("loading eBPF object");
         let mut bpf = Ebpf::load(include_bytes_aligned!(env!("BPFX_EBPF")))?;
 
+        log::debug!("loading kernel BTF");
         let btf = Btf::from_sys_fs()?;
 
-        if let Err(e) = EbpfLogger::init(&mut bpf) {
-            log::debug!("failed to initialize eBPF logger: {e}");
+        match EbpfLogger::init(&mut bpf) {
+            Ok(_) => log::debug!("initialized eBPF logger"),
+            Err(e) => log::debug!("failed to initialize eBPF logger: {e}"),
         }
 
+        log::debug!("retrieving EVENTS ring buffer map");
         let events = bpf
             .take_map("EVENTS")
             .ok_or_else(|| crate::error::Error::EventNotFound)?;
 
+        log::debug!("creating ring buffer");
         let ringbuf = RingBuf::try_from(events)?;
+
+        log::info!("bpfx initialized successfully");
+
         Ok(Self {
             bpf,
             btf,
@@ -133,6 +143,48 @@ impl Bpfx {
             mem: None,
             started: false,
             pending_renames: HashMap::with_capacity(1000),
+            config: BpfxConfig {
+                channel_capacity: 1024,
+            },
+        })
+    }
+
+    pub fn with_config(config: BpfxConfig) -> Result<Self> {
+        log::info!("loading eBPF object");
+        let mut bpf = Ebpf::load(include_bytes_aligned!(env!("BPFX_EBPF")))?;
+
+        log::debug!("loading kernel BTF");
+        let btf = Btf::from_sys_fs()?;
+
+        match EbpfLogger::init(&mut bpf) {
+            Ok(_) => log::debug!("initialized eBPF logger"),
+            Err(e) => log::debug!("failed to initialize eBPF logger: {e}"),
+        }
+
+        log::debug!("retrieving EVENTS ring buffer map");
+        let events = bpf
+            .take_map("EVENTS")
+            .ok_or_else(|| crate::error::Error::EventNotFound)?;
+
+        log::debug!("creating ring buffer");
+        let ringbuf = RingBuf::try_from(events)?;
+
+        log::info!(
+            "bpfx initialized successfully (channel_capacity={})",
+            config.channel_capacity
+        );
+
+        Ok(Self {
+            bpf,
+            btf,
+            ringbuf,
+            network: None,
+            process: None,
+            file: None,
+            mem: None,
+            started: false,
+            pending_renames: HashMap::with_capacity(1000),
+            config,
         })
     }
 
@@ -157,7 +209,7 @@ impl Bpfx {
     where
         S: Subscription,
     {
-        log::info!("Trying to subscribe..");
+        log::info!("registering subscription");
         filter.subscribe(self)
     }
 
@@ -183,8 +235,10 @@ impl Bpfx {
     }
 
     async fn event_loop(mut self) -> Result<()> {
+        log::info!("event loop started");
         loop {
             if !self.has_subscribers() {
+                log::info!("all subscriptions dropped, shutting down event loop");
                 break Err(crate::error::Error::NoActiveSubscriptions);
             }
 
@@ -218,6 +272,8 @@ impl Drop for Bpfx {
 }
 
 fn parse_network_event(event: &PendingConnect) -> (EventHeader, SocketEndpoints) {
+    log::debug!("parsing network events");
+
     let len = event
         .header
         .comm
@@ -374,6 +430,7 @@ fn attach_fexit(
     prog_name: &'static str,
     func_name: &'static str,
 ) -> crate::error::Result<()> {
+    log::info!("attaching fexit probe '{}' to '{}'", prog_name, func_name);
     let prog: &mut FExit = bpf
         .program_mut(prog_name)
         .ok_or(crate::error::Error::ProgramNotFound)?
@@ -389,6 +446,8 @@ fn attach_kprobe(
     prog_name: &'static str,
     symbol: &'static str,
 ) -> crate::error::Result<()> {
+    log::info!("attaching kprobe probe '{}' to '{}'", prog_name, symbol);
+
     let prog: &mut KProbe = bpf
         .program_mut(prog_name)
         .ok_or(crate::error::Error::ProgramNotFound)?
@@ -405,6 +464,8 @@ fn attach_fentry(
     prog_name: &'static str,
     symbol: &'static str,
 ) -> crate::error::Result<()> {
+    log::info!("attaching fentry probe '{}' to '{}'", prog_name, symbol);
+
     let prog: &mut FEntry = bpf
         .program_mut(prog_name)
         .ok_or(crate::error::Error::ProgramNotFound)?
@@ -421,6 +482,12 @@ fn attach_tracepoint(
     category: &'static str,
     tracepoint: &'static str,
 ) -> crate::error::Result<()> {
+    log::info!(
+        "attaching tracepoint probe '{}' to '{}'",
+        prog_name,
+        tracepoint
+    );
+
     let prog: &mut TracePoint = bpf
         .program_mut(prog_name)
         .ok_or(crate::error::Error::ProgramNotFound)?
@@ -593,7 +660,7 @@ pub(crate) fn attach_network_probe(
         attach_fexit(bpf, btf, UDP_CLOSE.0, UDP_CLOSE.1)?;
     }
 
-    log::info!("attached network probe..");
+    log::info!("attached network probe");
     Ok(())
 }
 
@@ -677,6 +744,8 @@ pub(crate) fn attach_process_probe(
     if filter.mask.contains(&ProcessMask::EXIT) {
         attach_fentry(bpf, btf, "do_group_exit", "do_group_exit")?;
     }
+
+    log::info!("attached process probe");
 
     Ok(())
 }
@@ -824,6 +893,8 @@ pub(crate) fn attach_file_probe(
         attach_fentry(bpf, btf, "vfs_rename", "vfs_rename")?;
         attach_fexit(bpf, btf, "vfs_rename_retval", "vfs_rename")?;
     }
+
+    log::info!("attached file probe");
 
     Ok(())
 }
@@ -1079,6 +1150,8 @@ pub(crate) fn attach_mem_probe(
     if filter.mask.contains(MemoryMask::UNMAP) {
         attach_fexit(bpf, btf, "__vm_munmap", "__vm_munmap")?;
     }
+
+    log::info!("attached memory probe");
 
     Ok(())
 }

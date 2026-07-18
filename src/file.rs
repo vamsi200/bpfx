@@ -178,6 +178,16 @@ impl Display for FileRenameEvent {
     }
 }
 
+/// A file system event.
+///
+/// This enum groups all file-related events emitted by bpfx, including file
+/// opens, reads, writes, closes, deletions, and renames.
+///
+/// Use pattern matching or the provided helper methods to inspect the
+/// underlying event.
+///
+/// This enum is marked as `non_exhaustive` and may gain additional variants
+/// in future releases.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum FileEvent {
@@ -408,7 +418,7 @@ impl Subscription for FileFilter {
     type Stream = PollFile;
 
     fn subscribe(self, bpfx: &mut Bpfx) -> Result<Self::Stream> {
-        let (tx, rx) = tokio::sync::mpsc::channel(1024);
+        let (tx, rx) = tokio::sync::mpsc::channel(bpfx.config.channel_capacity);
 
         let reg = FileRegister { filter: self, tx };
 

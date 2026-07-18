@@ -1,5 +1,5 @@
 use bpfx::{
-    Bpfx,
+    Bpfx, ProcessEvent,
     process::{ProcessFilter, ProcessMask},
 };
 use futures::StreamExt;
@@ -18,7 +18,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Watching process activity...");
 
     while let Some(event) = events.next().await {
-        println!("{event}");
+        match event {
+            ProcessEvent::Start(s) => println!("{s}"),
+            ProcessEvent::Exit(s) => println!("{s}"),
+            ProcessEvent::Fork(s) => println!("{s}"),
+            _ => {}
+        }
     }
 
     Ok(())

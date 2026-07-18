@@ -81,6 +81,16 @@ impl Stream for PollMem {
     }
 }
 
+/// A virtual memory event.
+///
+/// This enum groups virtual memory mapping and unmapping events emitted by
+/// bpfx.
+///
+/// Use pattern matching or the provided helper methods to inspect the
+/// underlying event.
+///
+/// This enum is marked as `non_exhaustive` and may gain additional variants
+/// in future releases.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum MemoryEvent {
@@ -200,7 +210,7 @@ impl Subscription for MemoryFilter {
     type Stream = PollMem;
 
     fn subscribe(self, bpfx: &mut Bpfx) -> Result<Self::Stream> {
-        let (tx, rx) = tokio::sync::mpsc::channel::<MemoryEvent>(1024);
+        let (tx, rx) = tokio::sync::mpsc::channel::<MemoryEvent>(bpfx.config.channel_capacity);
         let fr = MemRegister { filter: self, tx };
         attach_mem_probe(&fr.filter, &mut bpfx.bpf, &bpfx.btf)?;
         bpfx.mem = Some(fr);

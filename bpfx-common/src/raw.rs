@@ -13,6 +13,7 @@ pub const FILE_FIFO: u16 = 1 << 4;
 pub const FILE_LNK: u16 = 1 << 5;
 pub const FILE_SOCK: u16 = 1 << 6;
 
+#[non_exhaustive]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 pub enum EventType {
@@ -257,6 +258,7 @@ pub enum FilterKey {
     Gid(u32),
 }
 
+#[non_exhaustive]
 #[repr(u32)]
 pub enum FilterOwner {
     Memory = 0,

@@ -197,7 +197,7 @@ impl Subscription for NetworkFilter {
     type Stream = PollNetwork;
 
     fn subscribe(self, bpfx: &mut Bpfx) -> Result<Self::Stream> {
-        let (tx, rx) = tokio::sync::mpsc::channel(1024);
+        let (tx, rx) = tokio::sync::mpsc::channel(bpfx.config.channel_capacity);
 
         let reg = NetworkRegister { filter: self, tx };
 
@@ -334,6 +334,17 @@ impl Display for ListenEvent {
     }
 }
 
+/// A network socket event.
+///
+/// This enum groups all network-related events emitted by bpfx, such as
+/// connection establishment, socket binding, listening, accepting, and
+/// socket closure.
+///
+/// Use pattern matching or the provided helper methods to inspect the
+/// underlying event.
+///
+/// This enum is marked as `non_exhaustive` and may gain additional variants
+/// in future releases.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {

@@ -14,7 +14,7 @@ use std::{
 };
 use tokio::sync::mpsc::Sender;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Protocol {
     Tcp = 1,
     Udp = 2,
@@ -29,7 +29,7 @@ impl Display for Protocol {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SocketEndpoints {
     pub local_ip: IpAddr,
     pub local_port: u16,
@@ -232,7 +232,7 @@ impl NetworkFilter {
 /// Emitted after the kernel completes processing a successful connect() call.
 /// Generated from `tcp_v4_connect()` and `tcp_v6_connect()` fpr TCP.
 /// Generated from `udp_connect()` and `udpv6_connect()` for UDP.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ConnectEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
@@ -253,7 +253,7 @@ impl Display for ConnectEvent {
 /// Emitted after the kernel accepts an incoming TCP connection.
 /// Generated from `inet_csk_accept()`.
 /// This event is only emitted for TCP.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AcceptEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
@@ -273,7 +273,7 @@ impl Display for AcceptEvent {
 /// Emitted when the kernel closes a socket.
 /// Generated from `tcp_close()` for TCP sockets and
 /// `udp_destroy_sock()` for UDP sockets.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CloseEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
@@ -294,7 +294,7 @@ impl Display for CloseEvent {
 /// Generated from the `inet_bind` fexit hook.
 /// This event is emitted immediately after the kernel finishes processing
 /// a socket bind operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BindEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
@@ -316,7 +316,7 @@ impl Display for BindEvent {
 /// Generated from the `inet_listen` fexit hook.
 /// This event is emitted immediately after the kernel finishes processing
 /// a listen operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ListenEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
@@ -346,7 +346,7 @@ impl Display for ListenEvent {
 /// This enum is marked as `non_exhaustive` and may gain additional variants
 /// in future releases.
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NetworkEvent {
     Connect(ConnectEvent),
     Accept(AcceptEvent),
@@ -368,22 +368,22 @@ impl Display for NetworkEvent {
 }
 
 impl NetworkEvent {
-    fn protocol(&self) -> Protocol {
+    fn protocol(&self) -> &Protocol {
         match self {
-            Self::Connect(e) => e.protocol,
-            Self::Accept(e) => e.protocol,
-            Self::Close(e) => e.protocol,
-            Self::Bind(e) => e.protocol,
-            Self::Listen(e) => e.protocol,
+            Self::Connect(e) => &e.protocol,
+            Self::Accept(e) => &e.protocol,
+            Self::Close(e) => &e.protocol,
+            Self::Bind(e) => &e.protocol,
+            Self::Listen(e) => &e.protocol,
         }
     }
 
     pub fn is_tcp(&self) -> bool {
-        self.protocol() == Protocol::Tcp
+        *self.protocol() == Protocol::Tcp
     }
 
     pub fn is_udp(&self) -> bool {
-        self.protocol() == Protocol::Udp
+        *self.protocol() == Protocol::Udp
     }
 
     pub fn header(&self) -> &EventHeader {

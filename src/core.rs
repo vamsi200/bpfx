@@ -257,10 +257,10 @@ impl Bpfx {
     #[must_use = "call .await on the returned JoinHandle or explicitly drop it"]
     pub fn run(mut self) -> tokio::task::JoinHandle<Result<()>> {
         self.started = true;
-        tokio::spawn(async move { self.event_loop().await })
+        tokio::task::spawn_blocking(move || self.event_loop())
     }
 
-    async fn event_loop(mut self) -> Result<()> {
+    fn event_loop(mut self) -> Result<()> {
         log::info!("event loop started");
         loop {
             if !self.has_subscribers() {
@@ -391,6 +391,16 @@ macro_rules! process_event {
 }
 
 macro_rules! file_event {
+    ($variant: ident, $ty: ident, $header: expr, $filename: expr, $file_type: expr, $retval: expr, $flags: expr) => {
+        FileEvent::$variant($ty {
+            header: $header,
+            filename: $filename,
+            file_type: $file_type,
+            retval: $retval,
+            flags: $flags,
+        })
+    };
+
     ($variant: ident, $ty: ident, $header: expr, $filename: expr, $file_type: expr, $retval: expr) => {
         FileEvent::$variant($ty {
             header: $header,
@@ -400,13 +410,14 @@ macro_rules! file_event {
         })
     };
 
-    ($variant: ident, $ty: ident, $header: expr, $old_filename: expr, $new_filename: expr, $file_type: expr, $retval: expr) => {
+    ($variant: ident, $ty: ident, $header: expr, $old_filename: expr, $new_filename: expr, $file_type: expr, $retval: expr, $flags: expr) => {
         FileEvent::$variant($ty {
             header: $header,
             old_filename: $old_filename,
             new_filename: $new_filename,
             file_type: $file_type,
             retval: $retval,
+            flags: $flags,
         })
     };
 }
@@ -949,7 +960,8 @@ fn convert_file_events(
                 convert_header(event.header),
                 String::from_utf8_lossy(&event.filename[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
-                event.retval
+                event.retval,
+                event.flags
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
@@ -975,7 +987,8 @@ fn convert_file_events(
                 convert_header(event.header),
                 String::from_utf8_lossy(&event.filename[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
-                event.retval
+                event.retval,
+                event.flags
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
@@ -1001,7 +1014,8 @@ fn convert_file_events(
                 convert_header(event.header),
                 String::from_utf8_lossy(&event.filename[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
-                event.retval
+                event.retval,
+                event.flags
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
@@ -1027,7 +1041,8 @@ fn convert_file_events(
                 convert_header(event.header),
                 String::from_utf8_lossy(&event.filename[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
-                event.retval
+                event.retval,
+                event.flags
             )) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
@@ -1111,7 +1126,8 @@ fn convert_file_events(
                     String::from_utf8_lossy(&event.old_filename[..old_path_len]).into_owned(),
                     String::from_utf8_lossy(&event.new_filename[..new_path_len]).into_owned(),
                     FileType::from(event.file_mode),
-                    ret_event.retval
+                    ret_event.retval,
+                    event.flags
                 )) {
                     Ok(()) => {}
                     Err(TrySendError::Full(_)) => {

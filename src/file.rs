@@ -18,7 +18,7 @@ use std::{
 };
 use tokio::sync::mpsc::Sender;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FileType {
     Regular,
     Directory,
@@ -45,16 +45,38 @@ impl From<FileModeFilter> for FileType {
     }
 }
 
+impl FileType {
+    pub const fn mode_bits(self) -> u32 {
+        match self {
+            Self::Regular => 0o100000,
+            Self::Directory => 0o040000,
+            Self::CharDevice => 0o020000,
+            Self::BlockDevice => 0o060000,
+            Self::Fifo => 0o010000,
+            Self::Symlink => 0o120000,
+            Self::Socket => 0o140000,
+            Self::Unknown => 0,
+        }
+    }
+}
+
+impl From<FileType> for u32 {
+    fn from(value: FileType) -> Self {
+        value.mode_bits()
+    }
+}
+
 /// Emitted when the kernel completes opening a file.
 /// Generated from the `vfs_open` fexit hook.
 /// This event is emitted immediately after the kernel finishes processing
 /// a file open operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileOpenEvent {
     pub header: EventHeader,
     pub filename: String,
     pub file_type: FileType,
     pub retval: i32,
+    pub flags: u32,
 }
 
 impl Display for FileOpenEvent {
@@ -71,12 +93,13 @@ impl Display for FileOpenEvent {
 /// Generated from the `filp_close` fexit hook.
 /// This event is emitted immediately after the kernel completes the file
 /// close operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileCloseEvent {
     pub header: EventHeader,
     pub filename: String,
     pub file_type: FileType,
     pub retval: i32,
+    pub flags: u32,
 }
 
 impl Display for FileCloseEvent {
@@ -93,12 +116,13 @@ impl Display for FileCloseEvent {
 /// Generated from the `vfs_read` fexit hook.
 /// This event is emitted immediately after the kernel finishes processing
 /// a read request for a file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileReadEvent {
     pub header: EventHeader,
     pub filename: String,
     pub file_type: FileType,
     pub retval: isize,
+    pub flags: u32,
 }
 
 impl Display for FileReadEvent {
@@ -115,12 +139,13 @@ impl Display for FileReadEvent {
 /// Generated from the `vfs_write` fexit hook.
 /// This event is emitted immediately after the kernel finishes processing
 /// a write request for a file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileWriteEvent {
     pub header: EventHeader,
     pub filename: String,
     pub file_type: FileType,
     pub retval: isize,
+    pub flags: u32,
 }
 
 impl Display for FileWriteEvent {
@@ -137,7 +162,7 @@ impl Display for FileWriteEvent {
 /// Generated from the `vfs_unlink` fexit hook.
 /// This event is emitted immediately after the kernel removes a directory
 /// entry for a file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileDeleteEvent {
     pub header: EventHeader,
     pub filename: String,
@@ -159,12 +184,13 @@ impl Display for FileDeleteEvent {
 /// Generated using the `vfs_rename` fentry and fexit hooks to capture both
 /// the operation metadata and its return value.
 /// This event is emitted after the kernel completes the rename operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FileRenameEvent {
     pub header: EventHeader,
     pub old_filename: String,
     pub new_filename: String,
     pub file_type: FileType,
+    pub flags: u32,
     pub retval: i32,
 }
 
@@ -223,14 +249,14 @@ impl FileEvent {
         self.header().is_kernel_thread()
     }
 
-    pub fn file_type(&self) -> FileType {
+    pub fn file_type(&self) -> &FileType {
         match self {
-            Self::Open(e) => e.file_type,
-            Self::Read(e) => e.file_type,
-            Self::Close(e) => e.file_type,
-            Self::Write(e) => e.file_type,
-            Self::Delete(e) => e.file_type,
-            Self::Rename(e) => e.file_type,
+            Self::Open(e) => &e.file_type,
+            Self::Read(e) => &e.file_type,
+            Self::Close(e) => &e.file_type,
+            Self::Write(e) => &e.file_type,
+            Self::Delete(e) => &e.file_type,
+            Self::Rename(e) => &e.file_type,
         }
     }
 

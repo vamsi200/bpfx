@@ -17,7 +17,7 @@ use tokio::sync::mpsc::Sender;
 /// Generated from the `sched_process_exec` tracepoint.
 /// This event is emitted after a successful `execve()`- family call, when the
 /// process begins executing the new executable.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ProcessStartEvent {
     pub header: EventHeader,
     pub filename: String,
@@ -32,7 +32,7 @@ impl Display for ProcessStartEvent {
 /// Emitted when a process exits.
 /// Generated from `do_group_exit()`.
 /// The `exit_code` contains the raw kernel exit status.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ProcessExitEvent {
     pub header: EventHeader,
     pub exit_code: i32,

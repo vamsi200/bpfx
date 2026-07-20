@@ -7,7 +7,7 @@ pub struct ProcessId {
     pub tid: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EventHeader {
     pub timestamp_ns: u64,
 

@@ -129,6 +129,7 @@ pub struct RawFileOpenEvent {
     pub filename: [u8; 256],
     pub file_mode: FileModeFilter,
     pub retval: i32,
+    pub flags: u32,
 }
 
 #[repr(C)]
@@ -138,6 +139,7 @@ pub struct RawFileCloseEvent {
     pub filename: [u8; 256],
     pub file_mode: FileModeFilter,
     pub retval: i32,
+    pub flags: u32,
 }
 
 #[repr(C)]
@@ -156,6 +158,7 @@ pub struct RawFileReadEvent {
     pub filename: [u8; 256],
     pub file_mode: FileModeFilter,
     pub retval: isize,
+    pub flags: u32,
 }
 
 #[cfg(feature = "user")]
@@ -180,6 +183,7 @@ pub struct RawFileWriteEvent {
     pub header: RawEventHeader,
     pub filename: [u8; 256],
     pub file_mode: FileModeFilter,
+    pub flags: u32,
     pub retval: isize,
 }
 
@@ -206,6 +210,7 @@ pub struct RawFileRenameEvent {
     pub old_filename: [u8; 256],
     pub new_filename: [u8; 256],
     pub file_mode: FileModeFilter,
+    pub flags: u32,
 }
 
 #[repr(C)]

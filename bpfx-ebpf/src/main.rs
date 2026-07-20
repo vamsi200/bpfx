@@ -468,10 +468,7 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<i32, i32> {
             p as *const _,
         );
 
-        events.write(RawProcessStartEvent {
-            header,
-            filename: filename,
-        });
+        events.write(RawProcessStartEvent { header, filename });
 
         events.submit(0);
     }
@@ -558,6 +555,7 @@ fn try_vfs_open(ctx: FExitContext) -> Result<i32, i32> {
 
         let dentry = (*file).__bindgen_anon_1.f_path.dentry;
         let name = (*dentry).__bindgen_anon_1.d_name.name;
+        let flags = (*file).f_flags;
 
         let mut filename = [0u8; 256];
 
@@ -572,6 +570,7 @@ fn try_vfs_open(ctx: FExitContext) -> Result<i32, i32> {
             filename,
             file_mode: output.1,
             retval: ctx.arg(2),
+            flags,
         });
 
         event.submit(0);
@@ -604,6 +603,8 @@ pub fn try_flip_close(ctx: FExitContext) -> Result<i32, i32> {
 
         let file: *const file = ctx.arg(0);
 
+        let flags = (*file).f_flags;
+
         let output = capture_file(file);
 
         if !output.0 {
@@ -632,6 +633,7 @@ pub fn try_flip_close(ctx: FExitContext) -> Result<i32, i32> {
             filename,
             file_mode: output.1,
             retval: ctx.arg(2),
+            flags,
         });
 
         events.submit(0);
@@ -772,6 +774,8 @@ fn try_vfs_read(ctx: FExitContext) -> Result<i32, i32> {
         let dentry = (*file).__bindgen_anon_1.f_path.dentry;
         let name = (*dentry).__bindgen_anon_1.d_name.name;
 
+        let flags = (*file).f_flags;
+
         bpf_probe_read_kernel_str(
             filename.as_mut_ptr() as *mut _,
             filename.len() as u32,
@@ -782,6 +786,7 @@ fn try_vfs_read(ctx: FExitContext) -> Result<i32, i32> {
             filename,
             file_mode: output.1,
             retval: ctx.arg(4),
+            flags,
         });
 
         events.submit(0);
@@ -829,6 +834,7 @@ fn try_vfs_write(ctx: FExitContext) -> Result<i32, i32> {
 
         let dentry = (*file).__bindgen_anon_1.f_path.dentry;
         let name = (*dentry).__bindgen_anon_1.d_name.name;
+        let flags = (*file).f_flags;
 
         bpf_probe_read_kernel_str(
             filename.as_mut_ptr() as *mut _,
@@ -841,6 +847,7 @@ fn try_vfs_write(ctx: FExitContext) -> Result<i32, i32> {
             filename,
             file_mode: output.1,
             retval: ctx.arg(4),
+            flags,
         });
 
         events.submit(0);
@@ -904,6 +911,7 @@ fn try_vfs_unlink(ctx: FExitContext) -> Result<i32, i32> {
         }
 
         let name = (*dentry).__bindgen_anon_1.d_name.name;
+
         let mut filename = [0u8; 256];
         bpf_probe_read_kernel_str(
             filename.as_mut_ptr() as *mut _,

@@ -17,12 +17,13 @@ use crate::{
 };
 use aya::maps::MapData;
 use aya::maps::ring_buf::RingBufItem;
-use aya::programs::TracePoint;
+use aya::programs::{Lsm, TracePoint};
 use aya::{
     Btf, Ebpf, include_bytes_aligned,
     maps::RingBuf,
     programs::{FEntry, FExit, KProbe},
 };
+use aya_log::EbpfLogger;
 use bpfx_common::raw::*;
 use std::collections::HashMap;
 use std::{
@@ -126,8 +127,14 @@ impl Bpfx {
     /// - kernel BTF information is unavailable,
     /// - the event ring buffer cannot be initialized.
     pub fn new() -> Result<Self> {
+        env_logger::init();
+
         log::info!("loading eBPF object");
         let mut bpf = Ebpf::load(include_bytes_aligned!("../assets/bpfx-ebpf.o"))?;
+
+        if let Err(e) = EbpfLogger::init(&mut bpf) {
+            log::debug!("failed to initialize eBPF logger: {e}");
+        }
 
         log::debug!("loading kernel BTF");
         let btf = Btf::from_sys_fs()?;
@@ -401,6 +408,17 @@ macro_rules! file_event {
         })
     };
 
+    (open, $variant: ident, $ty: ident, $header: expr, $filename: expr, $filepath: expr, $file_type: expr, $retval: expr, $flags: expr) => {
+        FileEvent::$variant($ty {
+            header: $header,
+            filename: $filename,
+            filepath: $filepath,
+            file_type: $file_type,
+            retval: $retval,
+            flags: $flags,
+        })
+    };
+
     ($variant: ident, $ty: ident, $header: expr, $filename: expr, $file_type: expr, $retval: expr) => {
         FileEvent::$variant($ty {
             header: $header,
@@ -410,7 +428,7 @@ macro_rules! file_event {
         })
     };
 
-    ($variant: ident, $ty: ident, $header: expr, $old_filename: expr, $new_filename: expr, $file_type: expr, $retval: expr, $flags: expr) => {
+    (rename, $variant: ident, $ty: ident, $header: expr, $old_filename: expr, $new_filename: expr, $file_type: expr, $retval: expr, $flags: expr) => {
         FileEvent::$variant($ty {
             header: $header,
             old_filename: $old_filename,
@@ -907,6 +925,7 @@ pub(crate) fn attach_file_probe(
     write_to_map(bpf, filter)?;
 
     if filter.event_type.contains(&FileMask::OPEN) {
+        attach_lsm_probe(bpf, btf)?;
         attach_fexit(bpf, btf, "vfs_open", "vfs_open")?;
     }
 
@@ -936,6 +955,15 @@ pub(crate) fn attach_file_probe(
     Ok(())
 }
 
+fn attach_lsm_probe(bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
+    let program: &mut Lsm = bpf.program_mut("file_open").unwrap().try_into()?;
+
+    program.load("file_open", &btf)?;
+    program.attach()?;
+
+    Ok(())
+}
+
 fn convert_file_events(
     producer: &mpsc::Sender<FileEvent>,
     events: &RingBufItem<'_>,
@@ -948,17 +976,25 @@ fn convert_file_events(
         EventType::FileOpen => {
             let event = unsafe { ptr::read(ptr as *const RawFileOpenEvent) };
 
-            let path_len = event
+            let file_name_len = event
                 .filename
                 .iter()
                 .position(|&x| x == 0)
                 .unwrap_or(event.filename.len());
 
+            let path_len = event
+                .filepath
+                .iter()
+                .position(|&x| x == 0)
+                .unwrap_or(event.filepath.len());
+
             match producer.try_send(file_event!(
+                open,
                 Open,
                 FileOpenEvent,
                 convert_header(event.header),
-                String::from_utf8_lossy(&event.filename[..path_len]).into_owned(),
+                String::from_utf8_lossy(&event.filename[..file_name_len]).into_owned(),
+                String::from_utf8_lossy(&event.filepath[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
                 event.retval,
                 event.flags
@@ -1120,6 +1156,7 @@ fn convert_file_events(
                     .unwrap_or(event.new_filename.len());
 
                 match producer.try_send(file_event!(
+                    rename,
                     Rename,
                     FileRenameEvent,
                     convert_header(event.header),

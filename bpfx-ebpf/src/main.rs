@@ -7,17 +7,17 @@ pub mod bindings;
 use crate::bindings::{dentry, file, in6_addr, inode, renamedata};
 use crate::bindings::{sock, socket, task_struct};
 use aya_ebpf::helpers::r#gen::{
-    bpf_get_current_task_btf, bpf_ktime_get_ns, bpf_probe_read_kernel_str,
+    bpf_d_path, bpf_get_current_task_btf, bpf_ktime_get_ns, bpf_probe_read_kernel_str,
 };
 use aya_ebpf::helpers::{
     bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_probe_read_kernel,
 };
 use aya_ebpf::macros::tracepoint;
 use aya_ebpf::maps::{HashMap, PerCpuArray, RingBuf};
-use aya_ebpf::programs::{FEntryContext, TracePointContext};
+use aya_ebpf::programs::{FEntryContext, LsmContext, TracePointContext};
 use aya_ebpf::programs::{FExitContext, RetProbeContext};
 use aya_ebpf::{EbpfContext, TASK_COMM_LEN};
-use aya_ebpf_macros::{fentry, map};
+use aya_ebpf_macros::{fentry, lsm, map};
 use aya_ebpf_macros::{fexit, kretprobe};
 use bpfx_common::raw::*;
 use bpfx_common::raw::{IpVersion, RawProtocol};
@@ -36,6 +36,15 @@ static TEMP: PerCpuArray<RawFileRenameEvent> = PerCpuArray::with_max_entries(1, 
 
 #[map]
 static FILTER: HashMap<u32, FilterKey> = HashMap::with_max_entries(5, 0);
+
+#[map]
+static FILE_OPEN_SCRATCH: PerCpuArray<RawFileOpenEvent> = PerCpuArray::with_max_entries(1, 0);
+
+#[map]
+static FILE_PATH_MAP: HashMap<u64, RawFilePath> = HashMap::with_max_entries(4 * 1024, 0);
+
+#[map]
+static PATH_BUF: PerCpuArray<[u8; 256]> = PerCpuArray::with_max_entries(1, 0);
 
 pub struct SockAddrIn {
     pub sin_family: u16,
@@ -517,6 +526,47 @@ fn try_do_group_exit(ctx: FEntryContext) -> Result<i32, i32> {
 //     unsafe { Ok(ctx.read_at(16).unwrap_or(-1)) }
 // }
 
+#[lsm]
+fn file_open(ctx: LsmContext) -> i32 {
+    match { try_file_open(ctx) } {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_file_open(ctx: LsmContext) -> Result<i32, i32> {
+    unsafe {
+        let file: *const file = ctx.arg(0);
+        if file.is_null() {
+            return Ok(0);
+        }
+
+        let path_buf = match PATH_BUF.get_ptr_mut(0) {
+            Some(ptr) => &mut *ptr,
+            None => return Ok(0),
+        };
+
+        let path =
+            core::ptr::addr_of!((*file).__bindgen_anon_1.f_path) as *mut aya_ebpf::bindings::path;
+
+        let ret = bpf_d_path(path, path_buf.as_mut_ptr() as *mut _, path_buf.len() as u32);
+
+        if ret < 0 {
+            return Ok(0);
+        }
+
+        let key = file as u64;
+
+        let value = RawFilePath {
+            filepath: *path_buf,
+        };
+
+        let _ = FILE_PATH_MAP.insert(&key, &value, 0);
+    }
+
+    Ok(0)
+}
+
 #[fexit]
 fn vfs_open(ctx: FExitContext) -> i32 {
     match { try_vfs_open(ctx) } {
@@ -530,6 +580,14 @@ fn try_vfs_open(ctx: FExitContext) -> Result<i32, i32> {
         let mut event = match EVENTS.reserve::<RawFileOpenEvent>(0) {
             Some(e) => e,
             None => return Ok(0),
+        };
+
+        let scratch = match FILE_OPEN_SCRATCH.get_ptr_mut(0) {
+            Some(ptr) => &mut *ptr,
+            None => {
+                event.discard(0);
+                return Ok(0);
+            }
         };
 
         let header = build_event_header(EventType::FileOpen);
@@ -554,25 +612,38 @@ fn try_vfs_open(ctx: FExitContext) -> Result<i32, i32> {
         }
 
         let dentry = (*file).__bindgen_anon_1.f_path.dentry;
+
         let name = (*dentry).__bindgen_anon_1.d_name.name;
         let flags = (*file).f_flags;
 
-        let mut filename = [0u8; 256];
+        let key = file as u64;
+
+        if let Some(val) = FILE_PATH_MAP.get(&key) {
+            scratch.filepath = val.filepath;
+            match FILE_PATH_MAP.remove(&key) {
+                Ok(_) => {}
+                Err(_) => {
+                    event.discard(0);
+                    return Ok(0);
+                }
+            }
+        } else {
+            event.discard(0);
+            return Ok(0);
+        }
 
         bpf_probe_read_kernel_str(
-            filename.as_mut_ptr() as *mut _,
-            filename.len() as u32,
+            scratch.filename.as_mut_ptr() as *mut _,
+            scratch.filename.len() as u32,
             name as *const _,
         );
 
-        event.write(RawFileOpenEvent {
-            header,
-            filename,
-            file_mode: output.1,
-            retval: ctx.arg(2),
-            flags,
-        });
+        scratch.header = header;
+        scratch.file_mode = output.1;
+        scratch.retval = ctx.arg(2);
+        scratch.flags = flags;
 
+        event.write(*scratch);
         event.submit(0);
     }
 

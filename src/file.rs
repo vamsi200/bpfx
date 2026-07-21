@@ -74,6 +74,7 @@ impl From<FileType> for u32 {
 pub struct FileOpenEvent {
     pub header: EventHeader,
     pub filename: String,
+    pub filepath: String,
     pub file_type: FileType,
     pub retval: i32,
     pub flags: u32,

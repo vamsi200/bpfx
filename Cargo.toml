@@ -29,6 +29,8 @@ tokio = { version = "1.52.3", features = [
 futures = "0.3.32"
 thiserror = "2.0.18"
 log = "0.4.33"
+env_logger = "0.11.11"
+aya-log = "0.2.1"
 
 [workspace]
 members = [
@@ -38,3 +40,10 @@ members = [
 ]
 
 resolver = "3"
+
+[profile.release]
+   panic = "abort"
+   lto = true
+   codegen-units = 1
+   overflow-checks = false
+   debug-assertions = false

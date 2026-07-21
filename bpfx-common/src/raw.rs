@@ -34,6 +34,7 @@ pub enum EventType {
     MemoryMap = 15,
     MemoryUnMap = 16,
     PendingFileRename = 17,
+    Test,
 }
 
 impl TryFrom<u8> for EventType {
@@ -124,9 +125,16 @@ pub struct RawProcessExitEvent {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+pub struct RawFilePath {
+    pub filepath: [u8; 256],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct RawFileOpenEvent {
     pub header: RawEventHeader,
     pub filename: [u8; 256],
+    pub filepath: [u8; 256],
     pub file_mode: FileModeFilter,
     pub retval: i32,
     pub flags: u32,

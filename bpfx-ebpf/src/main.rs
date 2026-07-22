@@ -38,9 +38,6 @@ static TEMP: PerCpuArray<RawFileRenameEvent> = PerCpuArray::with_max_entries(1, 
 static FILTER: HashMap<u32, FilterKey> = HashMap::with_max_entries(5, 0);
 
 #[map]
-static FILE_OPEN_SCRATCH: PerCpuArray<RawFileOpenEvent> = PerCpuArray::with_max_entries(1, 0);
-
-#[map]
 static FILE_PATH_MAP: HashMap<u64, RawFilePath> = HashMap::with_max_entries(4 * 1024, 0);
 
 #[map]
@@ -166,14 +163,14 @@ fn emit_v4(
     protocol: u8,
     event_type: EventType,
 ) -> Result<i32, i32> {
-    let mut event = match EVENTS.reserve::<PendingConnect>(0) {
+    let mut events = match EVENTS.reserve::<PendingConnect>(0) {
         Some(e) => e,
         None => return Ok(0),
     };
 
     let header = build_event_header(event_type);
     if filter_events(FilterOwner::Network, &header) {
-        event.discard(0);
+        events.discard(0);
         return Ok(0);
     }
 
@@ -184,7 +181,7 @@ fn emit_v4(
     let mut src_addr = [0u8; 16];
     src_addr[..4].copy_from_slice(&sock_rcv_saddr(sock).to_ne_bytes());
 
-    event.write(PendingConnect {
+    events.write(PendingConnect {
         header,
         protocol: RawProtocol::try_from(protocol).unwrap(), // unwrap is fine here.
         tid,
@@ -196,7 +193,7 @@ fn emit_v4(
         retval,
     });
 
-    event.submit(0);
+    events.submit(0);
     Ok(0)
 }
 
@@ -208,14 +205,14 @@ fn emit_v6(
     event_type: EventType,
 ) -> Result<i32, i32> {
     unsafe {
-        let mut event = match EVENTS.reserve::<PendingConnect>(0) {
+        let mut events = match EVENTS.reserve::<PendingConnect>(0) {
             Some(e) => e,
             None => return Ok(0),
         };
 
         let header = build_event_header(event_type);
         if filter_events(FilterOwner::Network, &header) {
-            event.discard(0);
+            events.discard(0);
             return Ok(0);
         }
 
@@ -224,7 +221,7 @@ fn emit_v6(
         let daddr = match read_v6_addr(core::ptr::addr_of!((*sock).__sk_common.skc_v6_daddr)) {
             Ok(a) => a,
             Err(_) => {
-                event.discard(0);
+                events.discard(0);
                 return Ok(0);
             }
         };
@@ -232,12 +229,12 @@ fn emit_v6(
         {
             Ok(a) => a,
             Err(_) => {
-                event.discard(0);
+                events.discard(0);
                 return Ok(0);
             }
         };
 
-        event.write(PendingConnect {
+        events.write(PendingConnect {
             header,
             protocol: RawProtocol::try_from(protocol).unwrap(),
             tid,
@@ -248,7 +245,7 @@ fn emit_v6(
             dst_addr: daddr,
             retval,
         });
-        event.submit(0);
+        events.submit(0);
     }
 
     Ok(0)
@@ -577,74 +574,68 @@ fn vfs_open(ctx: FExitContext) -> i32 {
 
 fn try_vfs_open(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
-        let mut event = match EVENTS.reserve::<RawFileOpenEvent>(0) {
+        let mut events = match EVENTS.reserve::<RawFileOpenEvent>(0) {
             Some(e) => e,
             None => return Ok(0),
-        };
-
-        let scratch = match FILE_OPEN_SCRATCH.get_ptr_mut(0) {
-            Some(ptr) => &mut *ptr,
-            None => {
-                event.discard(0);
-                return Ok(0);
-            }
         };
 
         let header = build_event_header(EventType::FileOpen);
 
         if filter_events(FilterOwner::File, &header) {
-            event.discard(0);
+            events.discard(0);
             return Ok(0);
         }
 
         let file: *const file = ctx.arg(1);
 
         if file.is_null() {
-            event.discard(0);
+            events.discard(0);
             return Ok(0);
         }
 
         let output = capture_file(file);
 
         if !output.0 {
-            event.discard(0);
+            events.discard(0);
             return Ok(0);
         }
 
-        let dentry = (*file).__bindgen_anon_1.f_path.dentry;
-
-        let name = (*dentry).__bindgen_anon_1.d_name.name;
         let flags = (*file).f_flags;
-
         let key = file as u64;
 
-        if let Some(val) = FILE_PATH_MAP.get(&key) {
-            scratch.filepath = val.filepath;
-            match FILE_PATH_MAP.remove(&key) {
-                Ok(_) => {}
-                Err(_) => {
-                    event.discard(0);
-                    return Ok(0);
-                }
-            }
+        let file_path = if let Some(val) = FILE_PATH_MAP.get(&key) {
+            val.filepath
         } else {
-            event.discard(0);
+            events.discard(0);
             return Ok(0);
-        }
+        };
 
-        bpf_probe_read_kernel_str(
-            scratch.filename.as_mut_ptr() as *mut _,
-            scratch.filename.len() as u32,
-            name as *const _,
-        );
+        events.write(RawFileOpenEvent {
+            header,
+            file_path,
+            file_mode: output.1,
+            retval: ctx.arg(2),
+            flags,
+        });
+        events.submit(0);
+    }
 
-        scratch.header = header;
-        scratch.file_mode = output.1;
-        scratch.retval = ctx.arg(2);
-        scratch.flags = flags;
+    Ok(0)
+}
 
-        event.write(*scratch);
-        event.submit(0);
+#[fexit]
+pub fn __fput(ctx: FExitContext) -> i32 {
+    match try_fput(ctx) {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_fput(ctx: FExitContext) -> Result<i32, i32> {
+    unsafe {
+        let file: *const file = ctx.arg(0);
+        let key = file as u64;
+        let _ = FILE_PATH_MAP.remove(&key);
     }
 
     Ok(0)
@@ -658,7 +649,7 @@ pub fn filp_close(ctx: FExitContext) -> i32 {
     }
 }
 
-pub fn try_flip_close(ctx: FExitContext) -> Result<i32, i32> {
+fn try_flip_close(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
         let mut events = match EVENTS.reserve::<RawFileCloseEvent>(0) {
             Some(s) => s,
@@ -688,20 +679,17 @@ pub fn try_flip_close(ctx: FExitContext) -> Result<i32, i32> {
             return Ok(0);
         }
 
-        let dentry = (*file).__bindgen_anon_1.f_path.dentry;
-        let name = (*dentry).__bindgen_anon_1.d_name.name;
-
-        let mut filename = [0u8; 256];
-
-        bpf_probe_read_kernel_str(
-            filename.as_mut_ptr() as *mut _,
-            filename.len() as u32,
-            name as *const _,
-        );
+        let key = file as u64;
+        let file_path = if let Some(val) = FILE_PATH_MAP.get(&key) {
+            val.filepath
+        } else {
+            events.discard(0);
+            return Ok(0);
+        };
 
         events.write(RawFileCloseEvent {
             header,
-            filename,
+            file_path,
             file_mode: output.1,
             retval: ctx.arg(2),
             flags,
@@ -840,21 +828,18 @@ fn try_vfs_read(ctx: FExitContext) -> Result<i32, i32> {
             return Ok(0);
         }
 
-        let mut filename = [0u8; 256];
-
-        let dentry = (*file).__bindgen_anon_1.f_path.dentry;
-        let name = (*dentry).__bindgen_anon_1.d_name.name;
+        let key = file as u64;
+        let file_path = if let Some(val) = FILE_PATH_MAP.get(&key) {
+            val.filepath
+        } else {
+            events.discard(0);
+            return Ok(0);
+        };
 
         let flags = (*file).f_flags;
-
-        bpf_probe_read_kernel_str(
-            filename.as_mut_ptr() as *mut _,
-            filename.len() as u32,
-            name as *const _,
-        );
         events.write(RawFileReadEvent {
             header,
-            filename,
+            file_path,
             file_mode: output.1,
             retval: ctx.arg(4),
             flags,
@@ -901,21 +886,19 @@ fn try_vfs_write(ctx: FExitContext) -> Result<i32, i32> {
             return Ok(0);
         }
 
-        let mut filename = [0u8; 256];
+        let key = file as u64;
+        let file_path = if let Some(val) = FILE_PATH_MAP.get(&key) {
+            val.filepath
+        } else {
+            events.discard(0);
+            return Ok(0);
+        };
 
-        let dentry = (*file).__bindgen_anon_1.f_path.dentry;
-        let name = (*dentry).__bindgen_anon_1.d_name.name;
         let flags = (*file).f_flags;
-
-        bpf_probe_read_kernel_str(
-            filename.as_mut_ptr() as *mut _,
-            filename.len() as u32,
-            name as *const _,
-        );
 
         events.write(RawFileWriteEvent {
             header,
-            filename,
+            file_path,
             file_mode: output.1,
             retval: ctx.arg(4),
             flags,
@@ -983,16 +966,16 @@ fn try_vfs_unlink(ctx: FExitContext) -> Result<i32, i32> {
 
         let name = (*dentry).__bindgen_anon_1.d_name.name;
 
-        let mut filename = [0u8; 256];
+        let mut file_name = [0u8; 256];
         bpf_probe_read_kernel_str(
-            filename.as_mut_ptr() as *mut _,
-            filename.len() as u32,
+            file_name.as_mut_ptr() as *mut _,
+            file_name.len() as u32,
             name as *const _,
         );
 
         events.write(RawFileDeleteEvent {
             header,
-            filename,
+            file_name,
             file_mode: output.1,
             retval: ctx.arg(4),
         });

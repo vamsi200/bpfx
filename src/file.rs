@@ -12,6 +12,7 @@ use bpfx_common::raw::{
 use core::fmt;
 use futures::Stream;
 use std::fmt::Display;
+use std::path::Path;
 use std::{
     ops::{BitOr, BitOrAssign},
     time::Duration,
@@ -73,8 +74,7 @@ impl From<FileType> for u32 {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileOpenEvent {
     pub header: EventHeader,
-    pub filename: String,
-    pub filepath: String,
+    pub file_path: String,
     pub file_type: FileType,
     pub retval: i32,
     pub flags: u32,
@@ -85,7 +85,7 @@ impl Display for FileOpenEvent {
         write!(
             f,
             "{} OPEN {} -> {}",
-            self.header, self.filename, self.retval,
+            self.header, self.file_path, self.retval,
         )
     }
 }
@@ -97,7 +97,7 @@ impl Display for FileOpenEvent {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileCloseEvent {
     pub header: EventHeader,
-    pub filename: String,
+    pub file_path: String,
     pub file_type: FileType,
     pub retval: i32,
     pub flags: u32,
@@ -108,7 +108,7 @@ impl Display for FileCloseEvent {
         write!(
             f,
             "{} CLOSE {} ({})",
-            self.header, self.filename, self.retval
+            self.header, self.file_path, self.retval
         )
     }
 }
@@ -120,7 +120,7 @@ impl Display for FileCloseEvent {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileReadEvent {
     pub header: EventHeader,
-    pub filename: String,
+    pub file_path: String,
     pub file_type: FileType,
     pub retval: isize,
     pub flags: u32,
@@ -131,7 +131,7 @@ impl Display for FileReadEvent {
         write!(
             f,
             "{} READ {} ({})",
-            self.header, self.filename, self.retval
+            self.header, self.file_path, self.retval
         )
     }
 }
@@ -143,7 +143,7 @@ impl Display for FileReadEvent {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileWriteEvent {
     pub header: EventHeader,
-    pub filename: String,
+    pub file_path: String,
     pub file_type: FileType,
     pub retval: isize,
     pub flags: u32,
@@ -154,7 +154,7 @@ impl Display for FileWriteEvent {
         write!(
             f,
             "{} WRITE {} ({})",
-            self.header, self.filename, self.retval
+            self.header, self.file_path, self.retval
         )
     }
 }
@@ -261,14 +261,44 @@ impl FileEvent {
         }
     }
 
-    pub fn filename(&self) -> Option<&str> {
+    pub fn file_path(&self) -> Option<&str> {
         match self {
-            Self::Open(e) => Some(&e.filename),
-            Self::Read(e) => Some(&e.filename),
-            Self::Close(e) => Some(&e.filename),
-            Self::Write(e) => Some(&e.filename),
-            Self::Delete(e) => Some(&e.filename),
-            Self::Rename(_) => None,
+            Self::Open(e) => Some(&e.file_path),
+            Self::Read(e) => Some(&e.file_path),
+            Self::Close(e) => Some(&e.file_path),
+            Self::Write(e) => Some(&e.file_path),
+            _ => None,
+        }
+    }
+
+    pub fn file_name(&self) -> Option<&str> {
+        match self {
+            Self::Open(e) => Some(
+                Path::new(&e.file_path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(""),
+            ),
+            Self::Read(e) => Some(
+                Path::new(&e.file_path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(""),
+            ),
+            Self::Close(e) => Some(
+                Path::new(&e.file_path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(""),
+            ),
+            Self::Write(e) => Some(
+                Path::new(&e.file_path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(""),
+            ),
+
+            _ => None,
         }
     }
 

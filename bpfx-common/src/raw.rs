@@ -133,8 +133,7 @@ pub struct RawFilePath {
 #[derive(Debug, Clone, Copy)]
 pub struct RawFileOpenEvent {
     pub header: RawEventHeader,
-    pub filename: [u8; 256],
-    pub filepath: [u8; 256],
+    pub file_path: [u8; 256],
     pub file_mode: FileModeFilter,
     pub retval: i32,
     pub flags: u32,
@@ -144,7 +143,7 @@ pub struct RawFileOpenEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct RawFileCloseEvent {
     pub header: RawEventHeader,
-    pub filename: [u8; 256],
+    pub file_path: [u8; 256],
     pub file_mode: FileModeFilter,
     pub retval: i32,
     pub flags: u32,
@@ -163,7 +162,7 @@ pub struct RawProcessForkEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct RawFileReadEvent {
     pub header: RawEventHeader,
-    pub filename: [u8; 256],
+    pub file_path: [u8; 256],
     pub file_mode: FileModeFilter,
     pub retval: isize,
     pub flags: u32,
@@ -189,7 +188,7 @@ unsafe impl aya::Pod for FileModeFilter {}
 #[derive(Debug, Clone, Copy)]
 pub struct RawFileWriteEvent {
     pub header: RawEventHeader,
-    pub filename: [u8; 256],
+    pub file_path: [u8; 256],
     pub file_mode: FileModeFilter,
     pub flags: u32,
     pub retval: isize,
@@ -199,7 +198,7 @@ pub struct RawFileWriteEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct RawFileDeleteEvent {
     pub header: RawEventHeader,
-    pub filename: [u8; 256],
+    pub file_name: [u8; 256],
     pub file_mode: FileModeFilter,
     pub retval: i32,
 }

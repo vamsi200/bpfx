@@ -398,28 +398,17 @@ macro_rules! process_event {
 }
 
 macro_rules! file_event {
-    ($variant: ident, $ty: ident, $header: expr, $filename: expr, $file_type: expr, $retval: expr, $flags: expr) => {
+    (rest, $variant: ident, $ty: ident, $header: expr, $file_path: expr, $file_type: expr, $retval: expr, $flags: expr) => {
         FileEvent::$variant($ty {
             header: $header,
-            filename: $filename,
+            file_path: $file_path,
             file_type: $file_type,
             retval: $retval,
             flags: $flags,
         })
     };
 
-    (open, $variant: ident, $ty: ident, $header: expr, $filename: expr, $filepath: expr, $file_type: expr, $retval: expr, $flags: expr) => {
-        FileEvent::$variant($ty {
-            header: $header,
-            filename: $filename,
-            filepath: $filepath,
-            file_type: $file_type,
-            retval: $retval,
-            flags: $flags,
-        })
-    };
-
-    ($variant: ident, $ty: ident, $header: expr, $filename: expr, $file_type: expr, $retval: expr) => {
+    (delete, $variant: ident, $ty: ident, $header: expr, $filename: expr, $file_type: expr, $retval: expr) => {
         FileEvent::$variant($ty {
             header: $header,
             filename: $filename,
@@ -923,22 +912,26 @@ pub(crate) fn attach_file_probe(
 ) -> crate::error::Result<()> {
     write_to_fiter_map(&Filters::File(filter), FilterOwner::File, bpf)?;
     write_to_map(bpf, filter)?;
+    attach_lsm_probe(bpf, btf)?;
 
     if filter.event_type.contains(&FileMask::OPEN) {
-        attach_lsm_probe(bpf, btf)?;
         attach_fexit(bpf, btf, "vfs_open", "vfs_open")?;
+        attach_fexit(bpf, btf, "__fput", "__fput")?;
     }
 
     if filter.event_type.contains(&FileMask::CLOSE) {
         attach_fexit(bpf, btf, "filp_close", "filp_close")?;
+        attach_fexit(bpf, btf, "__fput", "__fput")?;
     }
 
     if filter.event_type.contains(&FileMask::READ) {
         attach_fexit(bpf, btf, "vfs_read", "vfs_read")?;
+        attach_fexit(bpf, btf, "__fput", "__fput")?;
     }
 
     if filter.event_type.contains(&FileMask::WRITE) {
         attach_fexit(bpf, btf, "vfs_write", "vfs_write")?;
+        attach_fexit(bpf, btf, "__fput", "__fput")?;
     }
 
     if filter.event_type.contains(&FileMask::DELETE) {
@@ -975,26 +968,18 @@ fn convert_file_events(
     match header.event_type {
         EventType::FileOpen => {
             let event = unsafe { ptr::read(ptr as *const RawFileOpenEvent) };
-
-            let file_name_len = event
-                .filename
-                .iter()
-                .position(|&x| x == 0)
-                .unwrap_or(event.filename.len());
-
             let path_len = event
-                .filepath
+                .file_path
                 .iter()
                 .position(|&x| x == 0)
-                .unwrap_or(event.filepath.len());
+                .unwrap_or(event.file_path.len());
 
             match producer.try_send(file_event!(
-                open,
+                rest,
                 Open,
                 FileOpenEvent,
                 convert_header(event.header),
-                String::from_utf8_lossy(&event.filename[..file_name_len]).into_owned(),
-                String::from_utf8_lossy(&event.filepath[..path_len]).into_owned(),
+                String::from_utf8_lossy(&event.file_path[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
                 event.retval,
                 event.flags
@@ -1011,17 +996,19 @@ fn convert_file_events(
 
         EventType::FileClose => {
             let event = unsafe { ptr::read(ptr as *const RawFileCloseEvent) };
+
             let path_len = event
-                .filename
+                .file_path
                 .iter()
                 .position(|&x| x == 0)
-                .unwrap_or(event.filename.len());
+                .unwrap_or(event.file_path.len());
 
             match producer.try_send(file_event!(
+                rest,
                 Close,
                 FileCloseEvent,
                 convert_header(event.header),
-                String::from_utf8_lossy(&event.filename[..path_len]).into_owned(),
+                String::from_utf8_lossy(&event.file_path[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
                 event.retval,
                 event.flags
@@ -1039,16 +1026,17 @@ fn convert_file_events(
         EventType::FileRead => {
             let event = unsafe { ptr::read(ptr as *const RawFileReadEvent) };
             let path_len = event
-                .filename
+                .file_path
                 .iter()
                 .position(|&x| x == 0)
-                .unwrap_or(event.filename.len());
+                .unwrap_or(event.file_path.len());
 
             match producer.try_send(file_event!(
+                rest,
                 Read,
                 FileReadEvent,
                 convert_header(event.header),
-                String::from_utf8_lossy(&event.filename[..path_len]).into_owned(),
+                String::from_utf8_lossy(&event.file_path[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
                 event.retval,
                 event.flags
@@ -1066,16 +1054,17 @@ fn convert_file_events(
         EventType::FileWrite => {
             let event = unsafe { ptr::read(ptr as *const RawFileWriteEvent) };
             let path_len = event
-                .filename
+                .file_path
                 .iter()
                 .position(|&x| x == 0)
-                .unwrap_or(event.filename.len());
+                .unwrap_or(event.file_path.len());
 
             match producer.try_send(file_event!(
+                rest,
                 Write,
                 FileWriteEvent,
                 convert_header(event.header),
-                String::from_utf8_lossy(&event.filename[..path_len]).into_owned(),
+                String::from_utf8_lossy(&event.file_path[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
                 event.retval,
                 event.flags
@@ -1093,16 +1082,17 @@ fn convert_file_events(
         EventType::FileDelete => {
             let event = unsafe { ptr::read(ptr as *const RawFileDeleteEvent) };
             let path_len = event
-                .filename
+                .file_name
                 .iter()
                 .position(|&x| x == 0)
-                .unwrap_or(event.filename.len());
+                .unwrap_or(event.file_name.len());
 
             match producer.try_send(file_event!(
+                delete,
                 Delete,
                 FileDeleteEvent,
                 convert_header(event.header),
-                String::from_utf8_lossy(&event.filename[..path_len]).into_owned(),
+                String::from_utf8_lossy(&event.file_name[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
                 event.retval
             )) {

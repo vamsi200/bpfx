@@ -26,13 +26,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match event {
             bpfx::file::FileEvent::Open(e) => {
-                println!("{e}");
+                println!("{e:?}");
             }
 
-            bpfx::file::FileEvent::Rename(e) => {
-                println!("{e}");
-            }
-
+            // bpfx::file::FileEvent::Rename(e) => {
+            //     println!("{e}");
+            // }
             _ => {}
         }
     }

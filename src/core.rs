@@ -398,11 +398,12 @@ macro_rules! process_event {
 }
 
 macro_rules! file_event {
-    (rest, $variant: ident, $ty: ident, $header: expr, $file_path: expr, $file_type: expr, $retval: expr, $flags: expr) => {
+    (rest, $variant: ident, $ty: ident, $header: expr, $file_path: expr, $file_type: expr, $inode: expr, $retval: expr, $flags: expr) => {
         FileEvent::$variant($ty {
             header: $header,
             file_path: $file_path,
             file_type: $file_type,
+            inode: $inode,
             retval: $retval,
             flags: $flags,
         })
@@ -978,6 +979,7 @@ fn convert_file_events(
                 convert_header(event.header),
                 String::from_utf8_lossy(&event.file_path[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
+                event.inode,
                 event.retval,
                 event.flags
             )) {
@@ -1007,6 +1009,7 @@ fn convert_file_events(
                 convert_header(event.header),
                 String::from_utf8_lossy(&event.file_path[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
+                event.inode,
                 event.retval,
                 event.flags
             )) {
@@ -1035,6 +1038,7 @@ fn convert_file_events(
                 convert_header(event.header),
                 String::from_utf8_lossy(&event.file_path[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
+                event.inode,
                 event.retval,
                 event.flags
             )) {
@@ -1063,6 +1067,7 @@ fn convert_file_events(
                 convert_header(event.header),
                 String::from_utf8_lossy(&event.file_path[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
+                event.inode,
                 event.retval,
                 event.flags
             )) {

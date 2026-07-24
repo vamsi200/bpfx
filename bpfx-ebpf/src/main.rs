@@ -614,6 +614,7 @@ fn try_vfs_open(ctx: FExitContext) -> Result<i32, i32> {
             header,
             file_path,
             file_mode: output.1,
+            inode: (*(*file).f_inode).i_ino,
             retval: ctx.arg(2),
             flags,
         });
@@ -691,6 +692,7 @@ fn try_flip_close(ctx: FExitContext) -> Result<i32, i32> {
             header,
             file_path,
             file_mode: output.1,
+            inode: (*(*file).f_inode).i_ino,
             retval: ctx.arg(2),
             flags,
         });
@@ -841,6 +843,7 @@ fn try_vfs_read(ctx: FExitContext) -> Result<i32, i32> {
             header,
             file_path,
             file_mode: output.1,
+            inode: (*(*file).f_inode).i_ino,
             retval: ctx.arg(4),
             flags,
         });
@@ -900,6 +903,7 @@ fn try_vfs_write(ctx: FExitContext) -> Result<i32, i32> {
             header,
             file_path,
             file_mode: output.1,
+            inode: (*(*file).f_inode).i_ino,
             retval: ctx.arg(4),
             flags,
         });

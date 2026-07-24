@@ -86,6 +86,7 @@ pub struct FileOpenEvent {
     pub header: EventHeader,
     pub file_path: String,
     pub file_type: FileType,
+    pub inode: u64,
     pub retval: i32,
     pub flags: u32,
 }
@@ -107,6 +108,7 @@ impl FileOpenEvent {
             .and_then(|s| s.to_str())
             .unwrap_or("")
     }
+
     pub fn flags(&self) -> String {
         let mut flags = Vec::new();
 
@@ -162,6 +164,7 @@ pub struct FileCloseEvent {
     pub header: EventHeader,
     pub file_path: String,
     pub file_type: FileType,
+    pub inode: u64,
     pub retval: i32,
     pub flags: u32,
 }
@@ -197,6 +200,7 @@ pub struct FileReadEvent {
     pub header: EventHeader,
     pub file_path: String,
     pub file_type: FileType,
+    pub inode: u64,
     pub retval: isize,
     pub flags: u32,
 }
@@ -233,6 +237,7 @@ pub struct FileWriteEvent {
     pub header: EventHeader,
     pub file_path: String,
     pub file_type: FileType,
+    pub inode: u64,
     pub retval: isize,
     pub flags: u32,
 }
@@ -417,6 +422,17 @@ impl FileEvent {
 
     pub fn failed(&self) -> bool {
         !self.succeeded()
+    }
+
+    pub fn inode(&self) -> Option<u64> {
+        match self {
+            Self::Open(e) => Some(e.inode),
+            Self::Read(e) => Some(e.inode),
+            Self::Close(e) => Some(e.inode),
+            Self::Write(e) => Some(e.inode),
+            Self::Delete(_) => None,
+            Self::Rename(_) => None,
+        }
     }
 }
 

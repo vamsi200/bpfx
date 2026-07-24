@@ -1,3 +1,4 @@
+#![allow(unused)]
 pub const TASK_COMM_LEN: usize = 16;
 pub const DNS_NAME_MAX: usize = 256;
 
@@ -152,6 +153,7 @@ pub struct RawFileOpenEvent {
     pub header: RawEventHeader,
     pub file_path: [u8; 256],
     pub file_mode: FileModeFilter,
+    pub inode: u64,
     pub retval: i32,
     pub flags: u32,
 }
@@ -162,6 +164,7 @@ pub struct RawFileCloseEvent {
     pub header: RawEventHeader,
     pub file_path: [u8; 256],
     pub file_mode: FileModeFilter,
+    pub inode: u64,
     pub retval: i32,
     pub flags: u32,
 }
@@ -181,6 +184,7 @@ pub struct RawFileReadEvent {
     pub header: RawEventHeader,
     pub file_path: [u8; 256],
     pub file_mode: FileModeFilter,
+    pub inode: u64,
     pub retval: isize,
     pub flags: u32,
 }
@@ -207,6 +211,7 @@ pub struct RawFileWriteEvent {
     pub header: RawEventHeader,
     pub file_path: [u8; 256],
     pub file_mode: FileModeFilter,
+    pub inode: u64,
     pub flags: u32,
     pub retval: isize,
 }

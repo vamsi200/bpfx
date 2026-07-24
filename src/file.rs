@@ -7,7 +7,9 @@ use crate::{
 };
 use bpfx_common::raw::{
     FILE_BLK, FILE_CHR, FILE_DIR, FILE_FIFO, FILE_LNK, FILE_REG, FILE_SOCK, FileModeFilter,
-    FilterKey,
+    FilterKey, O_ACCMODE, O_APPEND, O_ASYNC, O_CLOEXEC, O_CREAT, O_DIRECT, O_DIRECTORY, O_DSYNC,
+    O_EXCL, O_NOATIME, O_NOCTTY, O_NOFOLLOW, O_NONBLOCK, O_PATH, O_RDONLY, O_RDWR, O_SYNC,
+    O_TMPFILE, O_TRUNC, O_WRONLY,
 };
 use core::fmt;
 use futures::Stream;
@@ -20,6 +22,10 @@ use std::{
 use tokio::sync::mpsc::Sender;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum FileType {
     Regular,
     Directory,
@@ -72,6 +78,10 @@ impl From<FileType> for u32 {
 /// This event is emitted immediately after the kernel finishes processing
 /// a file open operation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct FileOpenEvent {
     pub header: EventHeader,
     pub file_path: String,
@@ -90,11 +100,64 @@ impl Display for FileOpenEvent {
     }
 }
 
+impl FileOpenEvent {
+    pub fn file_name(&self) -> &str {
+        Path::new(&self.file_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+    }
+    pub fn flags(&self) -> String {
+        let mut flags = Vec::new();
+
+        match self.flags & O_ACCMODE {
+            O_RDONLY => flags.push("RDONLY"),
+            O_WRONLY => flags.push("WRONLY"),
+            O_RDWR => flags.push("RDWR"),
+            _ => {}
+        }
+
+        macro_rules! push_flag {
+            ($flag:ident) => {
+                if self.flags & $flag != 0 {
+                    flags.push(stringify!($flag).trim_start_matches("O_"));
+                }
+            };
+        }
+
+        push_flag!(O_APPEND);
+        push_flag!(O_ASYNC);
+        push_flag!(O_CLOEXEC);
+        push_flag!(O_CREAT);
+        push_flag!(O_DIRECT);
+        push_flag!(O_DIRECTORY);
+        push_flag!(O_DSYNC);
+        push_flag!(O_EXCL);
+        push_flag!(O_NOATIME);
+        push_flag!(O_NOCTTY);
+        push_flag!(O_NOFOLLOW);
+        push_flag!(O_NONBLOCK);
+        push_flag!(O_PATH);
+        push_flag!(O_SYNC);
+        push_flag!(O_TRUNC);
+
+        if self.flags & O_TMPFILE == O_TMPFILE {
+            flags.push("TMPFILE");
+        }
+
+        flags.join("|")
+    }
+}
+
 /// Emitted when the kernel closes an open file.
 /// Generated from the `filp_close` fexit hook.
 /// This event is emitted immediately after the kernel completes the file
 /// close operation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct FileCloseEvent {
     pub header: EventHeader,
     pub file_path: String,
@@ -113,17 +176,38 @@ impl Display for FileCloseEvent {
     }
 }
 
+impl FileCloseEvent {
+    pub fn file_name(&self) -> &str {
+        Path::new(&self.file_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+    }
+}
 /// Emitted when the kernel completes a file read operation.
 /// Generated from the `vfs_read` fexit hook.
 /// This event is emitted immediately after the kernel finishes processing
 /// a read request for a file.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct FileReadEvent {
     pub header: EventHeader,
     pub file_path: String,
     pub file_type: FileType,
     pub retval: isize,
     pub flags: u32,
+}
+
+impl FileReadEvent {
+    pub fn file_name(&self) -> &str {
+        Path::new(&self.file_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+    }
 }
 
 impl Display for FileReadEvent {
@@ -141,12 +225,25 @@ impl Display for FileReadEvent {
 /// This event is emitted immediately after the kernel finishes processing
 /// a write request for a file.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct FileWriteEvent {
     pub header: EventHeader,
     pub file_path: String,
     pub file_type: FileType,
     pub retval: isize,
     pub flags: u32,
+}
+
+impl FileWriteEvent {
+    pub fn file_name(&self) -> &str {
+        Path::new(&self.file_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+    }
 }
 
 impl Display for FileWriteEvent {
@@ -164,6 +261,10 @@ impl Display for FileWriteEvent {
 /// This event is emitted immediately after the kernel removes a directory
 /// entry for a file.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct FileDeleteEvent {
     pub header: EventHeader,
     pub filename: String,
@@ -186,6 +287,10 @@ impl Display for FileDeleteEvent {
 /// the operation metadata and its return value.
 /// This event is emitted after the kernel completes the rename operation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct FileRenameEvent {
     pub header: EventHeader,
     pub old_filename: String,
@@ -273,31 +378,10 @@ impl FileEvent {
 
     pub fn file_name(&self) -> Option<&str> {
         match self {
-            Self::Open(e) => Some(
-                Path::new(&e.file_path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(""),
-            ),
-            Self::Read(e) => Some(
-                Path::new(&e.file_path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(""),
-            ),
-            Self::Close(e) => Some(
-                Path::new(&e.file_path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(""),
-            ),
-            Self::Write(e) => Some(
-                Path::new(&e.file_path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(""),
-            ),
-
+            Self::Open(e) => Some(e.file_name()),
+            Self::Read(e) => Some(e.file_name()),
+            Self::Close(e) => Some(e.file_name()),
+            Self::Write(e) => Some(e.file_name()),
             _ => None,
         }
     }

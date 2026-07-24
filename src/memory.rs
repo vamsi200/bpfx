@@ -18,7 +18,11 @@ use tokio::sync::mpsc::Sender;
 /// Generated from the `vm_mmap_pgoff` fexit hook.
 /// This event is emitted immediately after the kernel finishes creating a
 /// virtual memory mapping.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct MemoryMapEvent {
     pub header: EventHeader,
     pub requested_address: usize,
@@ -42,7 +46,11 @@ impl Display for MemoryMapEvent {
 /// Generated from the `__vm_munmap` fexit hook.
 /// This event is emitted immediately after the kernel finishes removing a
 /// virtual memory mapping.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct MemoryUnmapEvent {
     pub header: EventHeader,
     pub requested_address: usize,

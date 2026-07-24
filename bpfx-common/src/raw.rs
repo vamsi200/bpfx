@@ -1,7 +1,3 @@
-#![no_std]
-#![allow(unused)]
-
-use core::ops::{BitOr, BitOrAssign};
 pub const TASK_COMM_LEN: usize = 16;
 pub const DNS_NAME_MAX: usize = 256;
 
@@ -12,6 +8,27 @@ pub const FILE_BLK: u16 = 1 << 3;
 pub const FILE_FIFO: u16 = 1 << 4;
 pub const FILE_LNK: u16 = 1 << 5;
 pub const FILE_SOCK: u16 = 1 << 6;
+
+pub const O_RDONLY: u32 = 0;
+pub const O_WRONLY: u32 = 1;
+pub const O_RDWR: u32 = 2;
+pub const O_ACCMODE: u32 = 3;
+pub const O_APPEND: u32 = 1024;
+pub const O_ASYNC: u32 = 0x2000;
+pub const O_CLOEXEC: u32 = 0x80000;
+pub const O_CREAT: u32 = 64;
+pub const O_DIRECT: u32 = 0x4000;
+pub const O_DIRECTORY: u32 = 0x10000;
+pub const O_DSYNC: u32 = 4096;
+pub const O_EXCL: u32 = 128;
+pub const O_NOATIME: u32 = 0o1000000;
+pub const O_NOCTTY: u32 = 256;
+pub const O_NOFOLLOW: u32 = 0x20000;
+pub const O_NONBLOCK: u32 = 2048;
+pub const O_PATH: u32 = 0o10000000;
+pub const O_SYNC: u32 = 1052672;
+pub const O_TRUNC: u32 = 512;
+pub const O_TMPFILE: u32 = 0o20000000 | O_DIRECTORY;
 
 #[non_exhaustive]
 #[repr(u8)]

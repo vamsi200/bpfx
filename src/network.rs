@@ -15,6 +15,10 @@ use std::{
 use tokio::sync::mpsc::Sender;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum Protocol {
     Tcp = 1,
     Udp = 2,
@@ -30,6 +34,10 @@ impl Display for Protocol {
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct SocketEndpoints {
     pub local_ip: IpAddr,
     pub local_port: u16,
@@ -233,6 +241,10 @@ impl NetworkFilter {
 /// Generated from `tcp_v4_connect()` and `tcp_v6_connect()` fpr TCP.
 /// Generated from `udp_connect()` and `udpv6_connect()` for UDP.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct ConnectEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
@@ -254,6 +266,10 @@ impl Display for ConnectEvent {
 /// Generated from `inet_csk_accept()`.
 /// This event is only emitted for TCP.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct AcceptEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
@@ -274,6 +290,10 @@ impl Display for AcceptEvent {
 /// Generated from `tcp_close()` for TCP sockets and
 /// `udp_destroy_sock()` for UDP sockets.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct CloseEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
@@ -295,6 +315,10 @@ impl Display for CloseEvent {
 /// This event is emitted immediately after the kernel finishes processing
 /// a socket bind operation.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct BindEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
@@ -317,6 +341,10 @@ impl Display for BindEvent {
 /// This event is emitted immediately after the kernel finishes processing
 /// a listen operation.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct ListenEvent {
     pub header: EventHeader,
     pub protocol: Protocol,

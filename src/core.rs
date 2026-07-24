@@ -913,25 +913,22 @@ pub(crate) fn attach_file_probe(
     write_to_fiter_map(&Filters::File(filter), FilterOwner::File, bpf)?;
     write_to_map(bpf, filter)?;
     attach_lsm_probe(bpf, btf)?;
+    attach_fexit(bpf, btf, "__fput", "__fput")?;
 
     if filter.event_type.contains(&FileMask::OPEN) {
         attach_fexit(bpf, btf, "vfs_open", "vfs_open")?;
-        attach_fexit(bpf, btf, "__fput", "__fput")?;
     }
 
     if filter.event_type.contains(&FileMask::CLOSE) {
         attach_fexit(bpf, btf, "filp_close", "filp_close")?;
-        attach_fexit(bpf, btf, "__fput", "__fput")?;
     }
 
     if filter.event_type.contains(&FileMask::READ) {
         attach_fexit(bpf, btf, "vfs_read", "vfs_read")?;
-        attach_fexit(bpf, btf, "__fput", "__fput")?;
     }
 
     if filter.event_type.contains(&FileMask::WRITE) {
         attach_fexit(bpf, btf, "vfs_write", "vfs_write")?;
-        attach_fexit(bpf, btf, "__fput", "__fput")?;
     }
 
     if filter.event_type.contains(&FileMask::DELETE) {

@@ -8,6 +8,10 @@ pub struct ProcessId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct EventHeader {
     pub timestamp_ns: u64,
 

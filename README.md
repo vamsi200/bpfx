@@ -1,3 +1,5 @@
+>Note: WIP, api's may change.
+
 # bpfx
 
 `bpfx` provides a simple API for monitoring process, file, memory, and network
@@ -20,9 +22,11 @@ events without writing eBPF programs yourself.
   
 ## Installation
 
->Note: will update once published to crates.io.
+```bash
+cargo add bpfx futures tokio
+```
 
->Until then: clone this repo and use it directly by adding :
+>Or clone this repo and use it directly by adding :
 
 ```bash
 [dependencies]

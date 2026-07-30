@@ -26,10 +26,12 @@ use aya::{
 use aya_log::EbpfLogger;
 use bpfx_common::raw::*;
 use std::collections::HashMap;
+use std::os::fd::AsRawFd;
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     ptr,
 };
+use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, error::TrySendError};
 const MAX_PENDING_RENAMES: usize = 1024;
 
@@ -127,7 +129,7 @@ impl Bpfx {
     /// - kernel BTF information is unavailable,
     /// - the event ring buffer cannot be initialized.
     pub fn new() -> Result<Self> {
-        env_logger::init();
+        // env_logger::init();
 
         log::info!("loading eBPF object");
         let mut bpf = Ebpf::load(include_bytes_aligned!("../assets/bpfx-ebpf.o"))?;
@@ -264,18 +266,24 @@ impl Bpfx {
     #[must_use = "call .await on the returned JoinHandle or explicitly drop it"]
     pub fn run(mut self) -> tokio::task::JoinHandle<Result<()>> {
         self.started = true;
-        tokio::task::spawn_blocking(move || self.event_loop())
+
+        tokio::spawn(async move { self.event_loop().await })
     }
 
-    fn event_loop(mut self) -> Result<()> {
+    async fn event_loop(mut self) -> Result<()> {
         log::info!("event loop started");
+        let fd = self.ringbuf.as_raw_fd();
+        let async_fd = AsyncFd::new(fd)?;
+
         loop {
+            let mut ready = async_fd.readable().await?;
+
             if !self.has_subscribers() {
                 log::info!("all subscriptions dropped, shutting down event loop");
                 break Err(crate::error::Error::NoActiveSubscriptions);
             }
 
-            if let Some(events) = self.ringbuf.next() {
+            while let Some(events) = self.ringbuf.next() {
                 if let Some(nr) = &self.network {
                     convert_network_events(&nr.tx, &events)?;
                 }
@@ -292,6 +300,8 @@ impl Bpfx {
                     convert_mem_events(&pr.tx, &events)?;
                 }
             }
+
+            ready.clear_ready();
         }
     }
 }

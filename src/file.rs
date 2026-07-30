@@ -102,6 +102,18 @@ impl Display for FileOpenEvent {
 }
 
 impl FileOpenEvent {
+    pub fn is_read(&self) -> bool {
+        matches!(self.flags & O_ACCMODE, O_RDONLY | O_RDWR)
+    }
+
+    pub fn is_write(&self) -> bool {
+        matches!(self.flags & O_ACCMODE, O_WRONLY | O_RDWR)
+    }
+
+    pub fn has_flag(&self, flag: i32) -> bool {
+        (self.flags & flag as u32) != 0
+    }
+
     pub fn file_name(&self) -> &str {
         Path::new(&self.file_path)
             .file_name()
@@ -187,6 +199,7 @@ impl FileCloseEvent {
             .unwrap_or("")
     }
 }
+
 /// Emitted when the kernel completes a file read operation.
 /// Generated from the `vfs_read` fexit hook.
 /// This event is emitted immediately after the kernel finishes processing

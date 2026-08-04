@@ -21,6 +21,74 @@ use std::{
 };
 use tokio::sync::mpsc::Sender;
 
+pub trait FileInfo {
+    fn flags_raw(&self) -> u32;
+
+    fn is_read(&self) -> bool {
+        matches!(self.flags_raw() & O_ACCMODE, O_RDONLY | O_RDWR)
+    }
+
+    fn is_write(&self) -> bool {
+        matches!(self.flags_raw() & O_ACCMODE, O_WRONLY | O_RDWR)
+    }
+
+    fn has_flag(&self, flag: u32) -> bool {
+        self.flags_raw() & flag != 0
+    }
+
+    fn flags(&self) -> String {
+        let flags = self.flags_raw();
+        let mut out = Vec::new();
+
+        match flags & O_ACCMODE {
+            O_RDONLY => out.push("RDONLY"),
+            O_WRONLY => out.push("WRONLY"),
+            O_RDWR => out.push("RDWR"),
+            _ => {}
+        }
+
+        macro_rules! push_flag {
+            ($flag:ident) => {
+                if flags & $flag != 0 {
+                    out.push(stringify!($flag).trim_start_matches("O_"));
+                }
+            };
+        }
+
+        push_flag!(O_APPEND);
+        push_flag!(O_ASYNC);
+        push_flag!(O_CLOEXEC);
+        push_flag!(O_CREAT);
+        push_flag!(O_DIRECT);
+        push_flag!(O_DIRECTORY);
+        push_flag!(O_DSYNC);
+        push_flag!(O_EXCL);
+        push_flag!(O_NOATIME);
+        push_flag!(O_NOCTTY);
+        push_flag!(O_NOFOLLOW);
+        push_flag!(O_NONBLOCK);
+        push_flag!(O_PATH);
+        push_flag!(O_SYNC);
+        push_flag!(O_TRUNC);
+
+        if flags & O_TMPFILE == O_TMPFILE {
+            out.push("TMPFILE");
+        }
+
+        out.join("|")
+    }
+}
+
+macro_rules! impl_file_info {
+    ($t:ty) => {
+        impl FileInfo for $t {
+            fn flags_raw(&self) -> u32 {
+                self.flags
+            }
+        }
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(
     feature = "archive",
@@ -101,19 +169,9 @@ impl Display for FileOpenEvent {
     }
 }
 
+impl_file_info!(FileOpenEvent);
+
 impl FileOpenEvent {
-    pub fn is_read(&self) -> bool {
-        matches!(self.flags & O_ACCMODE, O_RDONLY | O_RDWR)
-    }
-
-    pub fn is_write(&self) -> bool {
-        matches!(self.flags & O_ACCMODE, O_WRONLY | O_RDWR)
-    }
-
-    pub fn has_flag(&self, flag: i32) -> bool {
-        (self.flags & flag as u32) != 0
-    }
-
     pub fn file_name(&self) -> &str {
         Path::new(&self.file_path)
             .file_name()
@@ -121,45 +179,8 @@ impl FileOpenEvent {
             .unwrap_or("")
     }
 
-    pub fn flags(&self) -> String {
-        let mut flags = Vec::new();
-
-        match self.flags & O_ACCMODE {
-            O_RDONLY => flags.push("RDONLY"),
-            O_WRONLY => flags.push("WRONLY"),
-            O_RDWR => flags.push("RDWR"),
-            _ => {}
-        }
-
-        macro_rules! push_flag {
-            ($flag:ident) => {
-                if self.flags & $flag != 0 {
-                    flags.push(stringify!($flag).trim_start_matches("O_"));
-                }
-            };
-        }
-
-        push_flag!(O_APPEND);
-        push_flag!(O_ASYNC);
-        push_flag!(O_CLOEXEC);
-        push_flag!(O_CREAT);
-        push_flag!(O_DIRECT);
-        push_flag!(O_DIRECTORY);
-        push_flag!(O_DSYNC);
-        push_flag!(O_EXCL);
-        push_flag!(O_NOATIME);
-        push_flag!(O_NOCTTY);
-        push_flag!(O_NOFOLLOW);
-        push_flag!(O_NONBLOCK);
-        push_flag!(O_PATH);
-        push_flag!(O_SYNC);
-        push_flag!(O_TRUNC);
-
-        if self.flags & O_TMPFILE == O_TMPFILE {
-            flags.push("TMPFILE");
-        }
-
-        flags.join("|")
+    pub fn file_path(&self) -> &str {
+        self.file_path.as_str()
     }
 }
 
@@ -191,12 +212,18 @@ impl Display for FileCloseEvent {
     }
 }
 
+impl_file_info!(FileCloseEvent);
+
 impl FileCloseEvent {
     pub fn file_name(&self) -> &str {
         Path::new(&self.file_path)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("")
+    }
+
+    pub fn file_path(&self) -> &str {
+        self.file_path.as_str()
     }
 }
 
@@ -218,12 +245,18 @@ pub struct FileReadEvent {
     pub flags: u32,
 }
 
+impl_file_info!(FileReadEvent);
+
 impl FileReadEvent {
     pub fn file_name(&self) -> &str {
         Path::new(&self.file_path)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("")
+    }
+
+    pub fn file_path(&self) -> &str {
+        self.file_path.as_str()
     }
 }
 
@@ -255,12 +288,18 @@ pub struct FileWriteEvent {
     pub flags: u32,
 }
 
+impl_file_info!(FileWriteEvent);
+
 impl FileWriteEvent {
     pub fn file_name(&self) -> &str {
         Path::new(&self.file_path)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("")
+    }
+
+    pub fn file_path(&self) -> &str {
+        self.file_path.as_str()
     }
 }
 
@@ -317,6 +356,8 @@ pub struct FileRenameEvent {
     pub flags: u32,
     pub retval: i32,
 }
+
+impl_file_info!(FileRenameEvent);
 
 impl Display for FileRenameEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -386,10 +427,10 @@ impl FileEvent {
 
     pub fn file_path(&self) -> Option<&str> {
         match self {
-            Self::Open(e) => Some(&e.file_path),
-            Self::Read(e) => Some(&e.file_path),
-            Self::Close(e) => Some(&e.file_path),
-            Self::Write(e) => Some(&e.file_path),
+            Self::Open(e) => Some(&e.file_path()),
+            Self::Read(e) => Some(&e.file_path()),
+            Self::Close(e) => Some(&e.file_path()),
+            Self::Write(e) => Some(&e.file_path()),
             _ => None,
         }
     }

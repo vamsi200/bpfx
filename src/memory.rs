@@ -116,6 +116,7 @@ impl Display for MemoryEvent {
 }
 
 impl MemoryEvent {
+    /// Returns the event header associated with this memory event.
     pub fn header(&self) -> &EventHeader {
         match self {
             Self::MemoryMap(e) => &e.header,
@@ -123,22 +124,27 @@ impl MemoryEvent {
         }
     }
 
+    /// Returns the process associated with this memory event.
     pub fn process(&self) -> ProcessId {
         self.header().process()
     }
 
+    /// Returns the timestamp at which the memory event occurred.
     pub fn timestamp(&self) -> Duration {
         self.header().timestamp()
     }
 
+    /// Returns `true` if the event originated from a kernel thread.
     pub fn is_kernel_thread(&self) -> bool {
         self.header().is_kernel_thread()
     }
 
+    /// Returns `true` if this is a memory mapping event.
     pub fn is_mmap(&self) -> bool {
         matches!(self, Self::MemoryMap(_))
     }
 
+    /// Returns `true` if this is a memory unmapping event.
     pub fn is_unmap(&self) -> bool {
         matches!(self, Self::MemoryUnMap(_))
     }
@@ -205,8 +211,9 @@ pub struct MemoryFilter {
 
 /// Internal registration state for a memory event subscription.
 ///
-/// Stores the active filter and the channel used to deliver events
-/// to the corresponding event stream.
+/// A registration owns the [`MemoryFilter`] used to configure the attached
+/// probes and the channel through which matching [`MemoryEvent`]s are
+/// delivered to the associated [`PollMem`] stream.
 #[derive(Debug)]
 pub(crate) struct MemRegister {
     pub filter: MemoryFilter,
@@ -217,6 +224,15 @@ impl Subscription for MemoryFilter {
     type Event = MemoryEvent;
     type Stream = PollMem;
 
+    /// Registers the memory-event probes and creates a stream for matching
+    /// events.
+    ///
+    /// The subscription creates a bounded channel using the configured
+    /// channel capacity, attaches the eBPF probes corresponding to the
+    /// filter, and stores the registration in the [`Bpfx`] runtime.
+    ///
+    /// The returned [`PollMem`] receives events produced by the registered
+    /// memory-event probes.
     fn subscribe(self, bpfx: &mut Bpfx) -> Result<Self::Stream> {
         let (tx, rx) = tokio::sync::mpsc::channel::<MemoryEvent>(bpfx.config.channel_capacity);
         let fr = MemRegister { filter: self, tx };
@@ -229,6 +245,7 @@ impl Subscription for MemoryFilter {
 }
 
 impl Default for MemoryFilter {
+    /// Creates a filter that subscribes to all supported memory events.
     fn default() -> Self {
         Self {
             mask: MemoryMask::ALL,
@@ -238,16 +255,26 @@ impl Default for MemoryFilter {
 }
 
 impl MemoryFilter {
+    /// Subscribes to all supported memory events.
+    ///
+    /// No additional process or key filtering is applied.
     pub const ALL: Self = Self {
         mask: MemoryMask::ALL,
         filter: FilterKey::None,
     };
 
+    /// Subscribes to memory mapping events.
+    ///
+    /// This includes events generated when memory is mapped into a process.
     pub const MMAP: Self = Self {
         mask: MemoryMask::MMAP,
         filter: FilterKey::None,
     };
 
+    /// Subscribes to memory unmapping events.
+    ///
+    /// This includes events generated when a memory mapping is removed from
+    /// a process.
     pub const UNMAP: Self = Self {
         mask: MemoryMask::UNMAP,
         filter: FilterKey::None,

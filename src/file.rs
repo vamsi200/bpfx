@@ -21,13 +21,46 @@ use std::{
 };
 use tokio::sync::mpsc::Sender;
 
+/// Provides access to the raw open flags associated with a file.
+///
+/// Implementors expose the flags passed when the file was opened, allowing
+/// callers to determine the file's access mode and inspect individual
+/// [`O_*`](https://man7.org/linux/man-pages/man2/open.2.html) flags.
+///
+/// The default methods interpret the flags using the Linux `open(2)`
+/// semantics.
+///
+/// # Access mode
+///
+/// [`O_ACCMODE`] contains the access-mode bits. The three supported access
+/// modes are:
+///
+/// - [`O_RDONLY`] — open for reading only.
+/// - [`O_WRONLY`] — open for writing only.
+/// - [`O_RDWR`] — open for both reading and writing.
+///
+/// [`O_ACCMODE`]: https://man7.org/linux/man-pages/man2/open.2.html
+/// [`O_RDONLY`]: https://man7.org/linux/man-pages/man2/open.2.html
+/// [`O_WRONLY`]: https://man7.org/linux/man-pages/man2/open.2.html
+/// [`O_RDWR`]: https://man7.org/linux/man-pages/man2/open.2.html
 pub trait FileInfo {
+    /// Returns the raw flags associated with the file.
+    ///
+    /// The returned value contains both the access mode (`O_RDONLY`,
+    /// `O_WRONLY`, or `O_RDWR`) and any additional `O_*` status flags that
+    /// were specified when the file was opened.
     fn flags_raw(&self) -> u32;
 
+    /// Returns `true` if the file was opened for reading.
+    ///
+    /// This returns `true` for both `O_RDONLY` and `O_RDWR`.
     fn is_read(&self) -> bool {
         matches!(self.flags_raw() & O_ACCMODE, O_RDONLY | O_RDWR)
     }
 
+    /// Returns `true` if the file was opened for writing.
+    ///
+    /// This returns `true` for both `O_WRONLY` and `O_RDWR`.
     fn is_write(&self) -> bool {
         matches!(self.flags_raw() & O_ACCMODE, O_WRONLY | O_RDWR)
     }
@@ -36,6 +69,16 @@ pub trait FileInfo {
         self.flags_raw() & flag != 0
     }
 
+    /// Returns the file's open flags as a human-readable, pipe-separated string.
+    ///
+    /// The access mode is reported first, followed by any supported status
+    /// flags. For example:
+    ///
+    /// ```text
+    /// WRONLY|APPEND|CLOEXEC
+    /// ```
+    ///
+    /// If no recognized flags are present, an empty string is returned.
     fn flags(&self) -> String {
         let flags = self.flags_raw();
         let mut out = Vec::new();
@@ -89,23 +132,59 @@ macro_rules! impl_file_info {
     };
 }
 
+/// Describes the type of a filesystem object.
+///
+/// `FileType` represents the common Unix filesystem object types supported
+/// by bpfx. It can be derived from a [`FileModeFilter`] and converted to the
+/// corresponding Unix file-type mode bits.
+///
+/// # Variants
+///
+/// - [`FileType::Regular`] — a regular file.
+/// - [`FileType::Directory`] — a directory.
+/// - [`FileType::CharDevice`] — a character device.
+/// - [`FileType::BlockDevice`] — a block device.
+/// - [`FileType::Fifo`] — a named pipe (FIFO).
+/// - [`FileType::Symlink`] — a symbolic link.
+/// - [`FileType::Socket`] — a Unix or network socket.
+/// - [`FileType::Unknown`] — an unrecognized or unsupported file type.
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub enum FileType {
+    /// A regular file.
     Regular,
+
+    /// A directory.
     Directory,
+
+    /// A character device.
     CharDevice,
+
+    /// A block device.
     BlockDevice,
+
+    /// A named pipe (FIFO).
     Fifo,
+
+    /// A symbolic link.
     Symlink,
+
+    /// A socket.
     Socket,
+
+    /// An unknown or unsupported filesystem object type.
     Unknown,
 }
 
 impl From<FileModeFilter> for FileType {
+    /// Converts a [`FileModeFilter`] into its corresponding [`FileType`].
+    ///
+    /// Any file mode not recognized by the conversion is mapped to
+    /// [`FileType::Unknown`].
     fn from(mode: FileModeFilter) -> Self {
         match mode.mode {
             FILE_REG => Self::Regular,
@@ -121,6 +200,23 @@ impl From<FileModeFilter> for FileType {
 }
 
 impl FileType {
+    /// Returns the Unix file-type mode bits corresponding to this file type.
+    ///
+    /// The returned value contains the `S_IF*` portion of a Unix file mode
+    /// and can be combined with the permission bits of a mode value.
+    ///
+    /// # Returns
+    ///
+    /// | File type | Mode bits |
+    /// |---|---:|
+    /// | [`FileType::Regular`] | `0o100000` |
+    /// | [`FileType::Directory`] | `0o040000` |
+    /// | [`FileType::CharDevice`] | `0o020000` |
+    /// | [`FileType::BlockDevice`] | `0o060000` |
+    /// | [`FileType::Fifo`] | `0o010000` |
+    /// | [`FileType::Symlink`] | `0o120000` |
+    /// | [`FileType::Socket`] | `0o140000` |
+    /// | [`FileType::Unknown`] | `0` |
     pub const fn mode_bits(self) -> u32 {
         match self {
             Self::Regular => 0o100000,
@@ -136,6 +232,7 @@ impl FileType {
 }
 
 impl From<FileType> for u32 {
+    /// Converts a [`FileType`] into its Unix file-type mode bits.
     fn from(value: FileType) -> Self {
         value.mode_bits()
     }
@@ -390,6 +487,26 @@ pub enum FileEvent {
     Rename(FileRenameEvent),
 }
 
+/// Identifies a file event for deduplication.
+///
+/// The key contains only the fields that are relevant for determining whether
+/// two file events should be considered equivalent by the event deduplication
+/// logic.
+///
+/// Different event types use different identifying fields:
+///
+/// - [`FileEventKey::Read`] uses the inode and return value.
+/// - [`FileEventKey::Write`] uses the inode and return value.
+/// - [`FileEventKey::Open`] uses the inode and open flags.
+/// - [`FileEventKey::Close`] uses the inode.
+/// - [`FileEventKey::Rename`] uses the return value.
+/// - [`FileEventKey::Delete`] uses the return value.
+///
+/// This type implements ordering and hashing so it can be used as a key in
+/// collections such as [`HashMap`] and [`HashSet`].
+///
+/// [`HashMap`]: std::collections::HashMap
+/// [`HashSet`]: std::collections::HashSet
 #[derive(Hash, Eq, PartialEq, PartialOrd, Ord)]
 pub enum FileEventKey {
     Read { inode: u64, retval: isize },
@@ -401,10 +518,15 @@ pub enum FileEventKey {
     Close { inode: u64 },
 
     Rename { retval: i32 },
+
     Delete { retval: i32 },
 }
 
 impl FileEvent {
+    /// Returns the deduplication key for this event.
+    ///
+    /// The returned key contains the fields used to determine whether this
+    /// event is equivalent to another event for deduplication purposes.
     pub fn dedup_key(&self) -> FileEventKey {
         match self {
             FileEvent::Read(e) => FileEventKey::Read {
@@ -430,6 +552,10 @@ impl FileEvent {
         }
     }
 
+    /// Returns the [`FileMask`] corresponding to this event.
+    ///
+    /// The mask can be used to classify the event and compare it against
+    /// file-event filters.
     pub fn event_type(&self) -> FileMask {
         match self {
             FileEvent::Open(_) => FileMask::OPEN,
@@ -441,6 +567,10 @@ impl FileEvent {
         }
     }
 
+    /// Returns the common event header.
+    ///
+    /// The header contains metadata shared by all file events, such as the
+    /// process identifier, timestamp, and kernel-thread information.
     pub fn header(&self) -> &EventHeader {
         match self {
             Self::Open(e) => &e.header,
@@ -452,18 +582,22 @@ impl FileEvent {
         }
     }
 
+    /// Returns the process associated with this event.
     pub fn process(&self) -> ProcessId {
         self.header().process()
     }
 
+    /// Returns the timestamp at which the event occurred.
     pub fn timestamp(&self) -> Duration {
         self.header().timestamp()
     }
 
+    /// Returns `true` if the event originated from a kernel thread.
     pub fn is_kernel_thread(&self) -> bool {
         self.header().is_kernel_thread()
     }
 
+    /// Returns the type of filesystem object associated with this event.
     pub fn file_type(&self) -> &FileType {
         match self {
             Self::Open(e) => &e.file_type,
@@ -475,6 +609,10 @@ impl FileEvent {
         }
     }
 
+    /// Returns the full path associated with the event, when available.
+    ///
+    /// Rename and delete events do not expose a file path through this
+    /// accessor.
     pub fn file_path(&self) -> Option<&str> {
         match self {
             Self::Open(e) => Some(&e.file_path()),
@@ -485,6 +623,10 @@ impl FileEvent {
         }
     }
 
+    /// Returns the file name associated with the event, when available.
+    ///
+    /// Rename and delete events do not expose a file name through this
+    /// accessor.
     pub fn file_name(&self) -> Option<&str> {
         match self {
             Self::Open(e) => Some(e.file_name()),
@@ -495,6 +637,9 @@ impl FileEvent {
         }
     }
 
+    /// Returns the previous filename for a rename event.
+    ///
+    /// Returns `None` for all event types other than [`FileEvent::Rename`].
     pub fn old_filename(&self) -> Option<&str> {
         match self {
             Self::Rename(e) => Some(&e.old_filename),
@@ -502,6 +647,9 @@ impl FileEvent {
         }
     }
 
+    /// Returns the new filename for a rename event.
+    ///
+    /// Returns `None` for all event types other than [`FileEvent::Rename`].
     pub fn new_filename(&self) -> Option<&str> {
         match self {
             Self::Rename(e) => Some(&e.new_filename),
@@ -509,6 +657,11 @@ impl FileEvent {
         }
     }
 
+    /// Returns the return value of the underlying file operation.
+    ///
+    /// The return value follows the convention of the corresponding
+    /// filesystem operation: non-negative values indicate success, while
+    /// negative values indicate failure.
     pub fn retval(&self) -> isize {
         match self {
             Self::Open(e) => e.retval as isize,
@@ -520,14 +673,25 @@ impl FileEvent {
         }
     }
 
+    /// Returns `true` if the underlying operation succeeded.
+    ///
+    /// An operation is considered successful when its return value is
+    /// non-negative.
     pub fn succeeded(&self) -> bool {
         self.retval() >= 0
     }
 
+    /// Returns `true` if the underlying operation failed.
+    ///
+    /// This is equivalent to `!self.succeeded()`.
     pub fn failed(&self) -> bool {
         !self.succeeded()
     }
 
+    /// Returns the inode associated with the event, when available.
+    ///
+    /// Inode information is available for open, read, close, and write
+    /// events. Rename and delete events return `None`.
     pub fn inode(&self) -> Option<u64> {
         match self {
             Self::Open(e) => Some(e.inode),
@@ -678,8 +842,9 @@ impl Default for FileFilter {
 
 /// Internal registration state for a file event subscription.
 ///
-/// Stores the active filter and the channel used to deliver events
-/// to the corresponding event stream.
+/// A registration owns the [`FileFilter`] used to configure the attached
+/// probes and the channel through which matching [`FileEvent`]s are
+/// delivered to the associated [`PollFile`] stream.
 #[derive(Debug)]
 pub(crate) struct FileRegister {
     pub filter: FileFilter,
@@ -690,6 +855,15 @@ impl Subscription for FileFilter {
     type Event = FileEvent;
     type Stream = PollFile;
 
+    /// Registers the file-event probes and creates a stream for matching
+    /// events.
+    ///
+    /// The subscription creates a bounded channel using the configured
+    /// channel capacity, attaches the eBPF probes corresponding to the
+    /// filter, and stores the registration in the [`Bpfx`] runtime.
+    ///
+    /// The returned [`PollFile`] receives events produced by the registered
+    /// file-event probes.
     fn subscribe(self, bpfx: &mut Bpfx) -> Result<Self::Stream> {
         let (tx, rx) = tokio::sync::mpsc::channel(bpfx.config.channel_capacity);
 
@@ -705,42 +879,63 @@ impl Subscription for FileFilter {
 }
 
 impl FileFilter {
+    /// Subscribes to file open events.
+    ///
+    /// No additional file-type or key filtering is applied.
     pub const OPEN: Self = Self {
         event_type: FileMask::OPEN,
         file_mode: FileTypeFilter::ALL,
         filter: FilterKey::None,
     };
 
+    /// Subscribes to file close events.
+    ///
+    /// No additional file-type or key filtering is applied.
     pub const CLOSE: Self = Self {
         event_type: FileMask::CLOSE,
         file_mode: FileTypeFilter::ALL,
         filter: FilterKey::None,
     };
 
+    /// Subscribes to file read events.
+    ///
+    /// No additional file-type or key filtering is applied.
     pub const READ: Self = Self {
         event_type: FileMask::READ,
         file_mode: FileTypeFilter::ALL,
         filter: FilterKey::None,
     };
 
+    /// Subscribes to file write events.
+    ///
+    /// No additional file-type or key filtering is applied.
     pub const WRITE: Self = Self {
         event_type: FileMask::WRITE,
         file_mode: FileTypeFilter::ALL,
         filter: FilterKey::None,
     };
 
+    /// Subscribes to file deletion events.
+    ///
+    /// No additional file-type or key filtering is applied.
     pub const DELETE: Self = Self {
         event_type: FileMask::DELETE,
         file_mode: FileTypeFilter::ALL,
         filter: FilterKey::None,
     };
 
+    /// Subscribes to file rename events.
+    ///
+    /// No additional file-type or key filtering is applied.
     pub const RENAME: Self = Self {
         event_type: FileMask::RENAME,
         file_mode: FileTypeFilter::ALL,
         filter: FilterKey::None,
     };
 
+    /// Subscribes to all supported file events.
+    ///
+    /// No additional file-type or key filtering is applied.
     pub const ALL: Self = Self {
         event_type: FileMask::ALL,
         file_mode: FileTypeFilter::ALL,

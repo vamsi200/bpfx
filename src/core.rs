@@ -30,7 +30,6 @@ use aya::{
 };
 use aya_log::EbpfLogger;
 use bpfx_common::raw::*;
-use log::info;
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
 use std::{
@@ -39,6 +38,7 @@ use std::{
 };
 use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, error::TrySendError};
+
 const MAX_PENDING_RENAMES: usize = 1024;
 
 pub(crate) enum LinkIdType {
@@ -52,7 +52,7 @@ pub(crate) enum LinkIdType {
 /// Configuration options for a [`Bpfx`] runtime.
 ///
 /// Use [`Bpfx::with_config`] to create a runtime with custom settings.
-// #[non_exhaustive]
+#[non_exhaustive]
 pub struct BpfxConfig {
     /// Capacity of the per-subscription event channel.
     ///
@@ -107,7 +107,6 @@ pub struct Bpfx {
     pub(crate) process: Option<ProcessRegister>,
     pub(crate) file: Option<FileRegister>,
     pub(crate) mem: Option<MemRegister>,
-    started: bool,
     pending_renames: HashMap<(u32, u32), RawFileRenameEvent>,
     pub config: BpfxConfig,
     pub(crate) link_id_type: Vec<(LinkIdType, String)>,
@@ -144,8 +143,6 @@ impl Bpfx {
     /// - kernel BTF information is unavailable,
     /// - the event ring buffer cannot be initialized.
     pub fn new() -> Result<Self> {
-        // env_logger::init();
-
         log::info!("loading eBPF object");
         let mut bpf = Ebpf::load(include_bytes_aligned!("../assets/bpfx-ebpf.o"))?;
 
@@ -174,7 +171,6 @@ impl Bpfx {
             process: None,
             file: None,
             mem: None,
-            started: false,
             pending_renames: HashMap::with_capacity(1000),
             config: BpfxConfig {
                 channel_capacity: 1024,
@@ -233,7 +229,6 @@ impl Bpfx {
             process: None,
             file: None,
             mem: None,
-            started: false,
             pending_renames: HashMap::with_capacity(1000),
             config,
             link_id_type: Vec::new(),
@@ -280,10 +275,7 @@ impl Bpfx {
     /// # Panics
     ///
     /// Panics if called outside of a Tokio runtime.
-    #[must_use = "call .await on the returned JoinHandle or explicitly drop it"]
-    pub fn run(mut self) -> tokio::task::JoinHandle<Result<()>> {
-        self.started = true;
-
+    pub fn run(self) -> tokio::task::JoinHandle<Result<()>> {
         tokio::spawn(async move { self.event_loop().await })
     }
 
@@ -297,7 +289,7 @@ impl Bpfx {
 
             if !self.has_subscribers() {
                 log::info!("all subscriptions dropped, shutting down event loop");
-                break Err(crate::error::Error::NoActiveSubscriptions);
+                break Ok(());
             }
 
             while let Some(events) = self.ringbuf.next() {
@@ -323,7 +315,6 @@ impl Bpfx {
     }
 
     pub fn destroy(&mut self) -> Result<()> {
-        info!("called DESTROYYY..");
         let mut handles = Vec::new();
 
         for (id, name) in self.link_id_type.drain(..) {
@@ -381,10 +372,9 @@ impl Bpfx {
 
 impl Drop for Bpfx {
     fn drop(&mut self) {
-        self.destroy().unwrap();
-        // if !self.started {
-        //     log::warn!("Bpfx dropped without calling run()");
-        // }
+        if let Err(e) = self.destroy() {
+            log::error!("Failed to manually destroy LinkId's: {e}");
+        }
     }
 }
 

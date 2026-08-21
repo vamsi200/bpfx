@@ -112,6 +112,10 @@ impl Display for ProcessEvent {
 }
 
 impl ProcessEvent {
+    /// Returns the event header associated with this process event.
+    ///
+    /// For [`ProcessEvent::Fork`] events, the parent process header is used,
+    /// while start and exit events use their own event header.
     pub fn header(&self) -> &EventHeader {
         match self {
             Self::Start(e) => &e.header,
@@ -120,26 +124,32 @@ impl ProcessEvent {
         }
     }
 
+    /// Returns the process associated with this event.
     pub fn process(&self) -> ProcessId {
         self.header().process()
     }
 
+    /// Returns the timestamp at which the process event occurred.
     pub fn timestamp(&self) -> Duration {
         self.header().timestamp()
     }
 
+    /// Returns `true` if the event originated from a kernel thread.
     pub fn is_kernel_thread(&self) -> bool {
         self.header().is_kernel_thread()
     }
 
+    /// Returns `true` if this is a process start event.
     pub fn is_start(&self) -> bool {
         matches!(self, Self::Start(_))
     }
 
+    /// Returns `true` if this is a process fork event.
     pub fn is_fork(&self) -> bool {
         matches!(self, Self::Fork(_))
     }
 
+    /// Returns `true` if this is a process exit event.
     pub fn is_exit(&self) -> bool {
         matches!(self, Self::Exit(_))
     }
@@ -229,7 +239,10 @@ impl BitOrAssign for ProcessMask {
 /// ```
 #[derive(Debug)]
 pub struct ProcessFilter {
+    /// Bitmask specifying which process event types should be observed.
     pub mask: ProcessMask,
+
+    /// Optional key used to further restrict the events matched by the filter.
     pub filter: FilterKey,
 }
 
@@ -247,6 +260,15 @@ impl Subscription for ProcessFilter {
     type Event = ProcessEvent;
     type Stream = PollProcess;
 
+    /// Registers the process-event probes and creates a stream for matching
+    /// events.
+    ///
+    /// The subscription creates a bounded channel using the configured
+    /// channel capacity, attaches the eBPF probes corresponding to the
+    /// filter, and stores the registration in the [`Bpfx`] runtime.
+    ///
+    /// The returned [`PollProcess`] receives events produced by the
+    /// registered process-event probes.
     fn subscribe(self, bpfx: &mut Bpfx) -> Result<Self::Stream> {
         let (tx, rx) = tokio::sync::mpsc::channel::<ProcessEvent>(bpfx.config.channel_capacity);
         let pr = ProcessRegister { filter: self, tx };
@@ -270,6 +292,8 @@ impl BitOr for ProcessFilter {
 }
 
 impl Default for ProcessFilter {
+    /// Creates a filter that matches all process event types without an
+    /// additional key filter.
     fn default() -> Self {
         Self {
             mask: ProcessMask::ALL,
@@ -279,21 +303,25 @@ impl Default for ProcessFilter {
 }
 
 impl ProcessFilter {
+    /// Subscribes to process start events.
     pub const START: Self = Self {
         mask: ProcessMask::START,
         filter: FilterKey::None,
     };
 
+    /// Subscribes to process fork events.
     pub const FORK: Self = Self {
         mask: ProcessMask::FORK,
         filter: FilterKey::None,
     };
 
+    /// Subscribes to process exit events.
     pub const EXIT: Self = Self {
         mask: ProcessMask::EXIT,
         filter: FilterKey::None,
     };
 
+    /// Subscribes to all supported process events.
     pub const ALL: Self = Self {
         mask: ProcessMask::ALL,
         filter: FilterKey::None,

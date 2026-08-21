@@ -15,6 +15,7 @@ use std::{
 };
 use tokio::sync::mpsc::Sender;
 
+/// Describes Protocol Types
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(
     feature = "archive",
@@ -34,16 +35,25 @@ impl Display for Protocol {
     }
 }
 
+/// Describes the local and remote endpoints of a network socket.
+///
+/// Contains the IP address and port for both sides of a socket connection.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub struct SocketEndpoints {
+    /// IP address of the local socket endpoint.
     pub local_ip: IpAddr,
+
+    /// Port number of the local socket endpoint.
     pub local_port: u16,
 
+    /// IP address of the remote socket endpoint.
     pub remote_ip: IpAddr,
+
+    /// Port number of the remote socket endpoint.
     pub remote_port: u16,
 }
 
@@ -193,8 +203,9 @@ impl Default for NetworkFilter {
 
 /// Internal registration state for a network event subscription.
 ///
-/// Stores the active filter and the channel used to deliver events
-/// to the corresponding event stream.
+/// A registration owns the [`NetworkFilter`] used to configure the attached
+/// probes and the channel through which matching [`NetworkEvent`]s are
+/// delivered to the associated [`PollNetwork`] stream.
 #[derive(Debug, Clone)]
 pub(crate) struct NetworkRegister {
     pub filter: NetworkFilter,
@@ -205,6 +216,15 @@ impl Subscription for NetworkFilter {
     type Event = NetworkEvent;
     type Stream = PollNetwork;
 
+    /// Registers the network-event probes and creates a stream for matching
+    /// events.
+    ///
+    /// The subscription creates a bounded channel using the configured
+    /// channel capacity, attaches the eBPF probes corresponding to the
+    /// filter, and stores the registration in the [`Bpfx`] runtime.
+    ///
+    /// The returned [`PollNetwork`] receives events produced by the
+    /// registered network-event probes.
     fn subscribe(self, bpfx: &mut Bpfx) -> Result<Self::Stream> {
         let (tx, rx) = tokio::sync::mpsc::channel(bpfx.config.channel_capacity);
 
@@ -221,18 +241,29 @@ impl Subscription for NetworkFilter {
 }
 
 impl NetworkFilter {
+    /// Subscribes to all supported network protocols and events.
+    ///
+    /// No additional process or key filtering is applied.
     pub const ALL: Self = Self {
         protocol_mask: ProtocolMask::ALL,
         event_mask: NetworkMask::ALL,
         filter: FilterKey::None,
     };
 
+    /// Subscribes to all supported TCP network events.
+    ///
+    /// All network event types are enabled, but only events associated with
+    /// the TCP protocol are delivered.
     pub const TCP: Self = Self {
         protocol_mask: ProtocolMask::TCP,
         event_mask: NetworkMask::ALL,
         filter: FilterKey::None,
     };
 
+    /// Subscribes to all supported UDP network events.
+    ///
+    /// All network event types are enabled, but only events associated with
+    /// the UDP protocol are delivered.
     pub const UDP: Self = Self {
         protocol_mask: ProtocolMask::UDP,
         event_mask: NetworkMask::ALL,
@@ -399,18 +430,22 @@ impl Display for NetworkEvent {
 }
 
 impl NetworkEvent {
+    /// Returns the process associated with this network event.
     pub fn process(&self) -> ProcessId {
         self.header().process()
     }
 
+    /// Returns the timestamp at which the network event occurred.
     pub fn timestamp(&self) -> Duration {
         self.header().timestamp()
     }
 
+    /// Returns `true` if the event originated from a kernel thread.
     pub fn is_kernel_thread(&self) -> bool {
         self.header().is_kernel_thread()
     }
 
+    /// Returns the network protocol associated with this event.
     fn protocol(&self) -> &Protocol {
         match self {
             Self::Connect(e) => &e.protocol,
@@ -421,14 +456,20 @@ impl NetworkEvent {
         }
     }
 
+    /// Returns `true` if this event uses the TCP protocol.
     pub fn is_tcp(&self) -> bool {
         *self.protocol() == Protocol::Tcp
     }
 
+    /// Returns `true` if this event uses the UDP protocol.
     pub fn is_udp(&self) -> bool {
         *self.protocol() == Protocol::Udp
     }
 
+    /// Returns the common event header.
+    ///
+    /// The header contains metadata shared by all network events, including
+    /// the process identifier, timestamp, and kernel-thread information.
     pub fn header(&self) -> &EventHeader {
         match self {
             Self::Connect(e) => &e.header,
@@ -439,6 +480,8 @@ impl NetworkEvent {
         }
     }
 
+    /// Returns the local and remote socket endpoints associated with this
+    /// event.
     pub fn endpoints(&self) -> &SocketEndpoints {
         match self {
             Self::Connect(e) => &e.endpoints,

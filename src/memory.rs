@@ -220,7 +220,8 @@ impl Subscription for MemoryFilter {
     fn subscribe(self, bpfx: &mut Bpfx) -> Result<Self::Stream> {
         let (tx, rx) = tokio::sync::mpsc::channel::<MemoryEvent>(bpfx.config.channel_capacity);
         let fr = MemRegister { filter: self, tx };
-        attach_mem_probe(&fr.filter, &mut bpfx.bpf, &bpfx.btf)?;
+        let ids = attach_mem_probe(&fr.filter, &mut bpfx.bpf, &bpfx.btf)?;
+        bpfx.link_id_type = ids;
         bpfx.mem = Some(fr);
 
         Ok(PollMem { rx })
@@ -251,4 +252,15 @@ impl MemoryFilter {
         mask: MemoryMask::UNMAP,
         filter: FilterKey::None,
     };
+}
+
+impl BitOr for MemoryFilter {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self {
+            mask: self.mask | rhs.mask,
+            filter: self.filter,
+        }
+    }
 }

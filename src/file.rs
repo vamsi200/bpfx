@@ -343,7 +343,7 @@ impl Display for FileDeleteEvent {
 /// Generated using the `vfs_rename` fentry and fexit hooks to capture both
 /// the operation metadata and its return value.
 /// This event is emitted after the kernel completes the rename operation.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
@@ -380,7 +380,7 @@ impl Display for FileRenameEvent {
 /// This enum is marked as `non_exhaustive` and may gain additional variants
 /// in future releases.
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 pub enum FileEvent {
     Open(FileOpenEvent),
     Read(FileReadEvent),
@@ -390,7 +390,57 @@ pub enum FileEvent {
     Rename(FileRenameEvent),
 }
 
+#[derive(Hash, Eq, PartialEq, PartialOrd, Ord)]
+pub enum FileEventKey {
+    Read { inode: u64, retval: isize },
+
+    Write { inode: u64, retval: isize },
+
+    Open { inode: u64, flags: u32 },
+
+    Close { inode: u64 },
+
+    Rename { retval: i32 },
+    Delete { retval: i32 },
+}
+
 impl FileEvent {
+    pub fn dedup_key(&self) -> FileEventKey {
+        match self {
+            FileEvent::Read(e) => FileEventKey::Read {
+                inode: e.inode,
+                retval: e.retval,
+            },
+
+            FileEvent::Open(e) => FileEventKey::Open {
+                inode: e.inode,
+                flags: e.flags,
+            },
+
+            FileEvent::Write(e) => FileEventKey::Write {
+                inode: e.inode,
+                retval: e.retval,
+            },
+
+            FileEvent::Close(e) => FileEventKey::Close { inode: e.inode },
+
+            FileEvent::Rename(e) => FileEventKey::Rename { retval: e.retval },
+
+            FileEvent::Delete(e) => FileEventKey::Delete { retval: e.retval },
+        }
+    }
+
+    pub fn event_type(&self) -> FileMask {
+        match self {
+            FileEvent::Open(_) => FileMask::OPEN,
+            FileEvent::Close(_) => FileMask::CLOSE,
+            FileEvent::Read(_) => FileMask::READ,
+            FileEvent::Write(_) => FileMask::WRITE,
+            FileEvent::Rename(_) => FileMask::RENAME,
+            FileEvent::Delete(_) => FileMask::DELETE,
+        }
+    }
+
     pub fn header(&self) -> &EventHeader {
         match self {
             Self::Open(e) => &e.header,
@@ -490,6 +540,18 @@ impl FileEvent {
     }
 }
 
+impl BitOr for FileFilter {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self {
+            filter: self.filter,
+            file_mode: self.file_mode,
+            event_type: self.event_type | rhs.event_type,
+        }
+    }
+}
+
 /// A stream of file events.
 ///
 /// Instances of this type are returned by [`Bpfx::subscribe`] when subscribing
@@ -519,7 +581,7 @@ impl Stream for PollFile {
 /// # use bpfx::file::FileMask;
 /// let mask = FileMask::OPEN | FileMask::WRITE | FileMask::DELETE;
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FileMask(u8);
 
 impl FileMask {
@@ -633,7 +695,8 @@ impl Subscription for FileFilter {
 
         let reg = FileRegister { filter: self, tx };
 
-        attach_file_probe(&reg.filter, &mut bpfx.bpf, &bpfx.btf)?;
+        let ids = attach_file_probe(&reg.filter, &mut bpfx.bpf, &bpfx.btf)?;
+        bpfx.link_id_type = ids;
 
         bpfx.file = Some(reg);
 
@@ -644,43 +707,43 @@ impl Subscription for FileFilter {
 impl FileFilter {
     pub const OPEN: Self = Self {
         event_type: FileMask::OPEN,
-        file_mode: FileTypeFilter::FILE_REG,
+        file_mode: FileTypeFilter::ALL,
         filter: FilterKey::None,
     };
 
     pub const CLOSE: Self = Self {
         event_type: FileMask::CLOSE,
-        file_mode: FileTypeFilter::FILE_REG,
+        file_mode: FileTypeFilter::ALL,
         filter: FilterKey::None,
     };
 
     pub const READ: Self = Self {
         event_type: FileMask::READ,
-        file_mode: FileTypeFilter::FILE_REG,
+        file_mode: FileTypeFilter::ALL,
         filter: FilterKey::None,
     };
 
     pub const WRITE: Self = Self {
         event_type: FileMask::WRITE,
-        file_mode: FileTypeFilter::FILE_REG,
+        file_mode: FileTypeFilter::ALL,
         filter: FilterKey::None,
     };
 
     pub const DELETE: Self = Self {
         event_type: FileMask::DELETE,
-        file_mode: FileTypeFilter::FILE_REG,
+        file_mode: FileTypeFilter::ALL,
         filter: FilterKey::None,
     };
 
     pub const RENAME: Self = Self {
         event_type: FileMask::RENAME,
-        file_mode: FileTypeFilter::FILE_REG,
+        file_mode: FileTypeFilter::ALL,
         filter: FilterKey::None,
     };
 
     pub const ALL: Self = Self {
         event_type: FileMask::ALL,
-        file_mode: FileTypeFilter::FILE_REG,
+        file_mode: FileTypeFilter::ALL,
         filter: FilterKey::None,
     };
 }
@@ -730,7 +793,7 @@ impl FileTypeFilter {
 
 impl Default for FileTypeFilter {
     fn default() -> Self {
-        Self::FILE_REG
+        Self::ALL
     }
 }
 

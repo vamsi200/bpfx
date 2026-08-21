@@ -250,10 +250,22 @@ impl Subscription for ProcessFilter {
     fn subscribe(self, bpfx: &mut Bpfx) -> Result<Self::Stream> {
         let (tx, rx) = tokio::sync::mpsc::channel::<ProcessEvent>(bpfx.config.channel_capacity);
         let pr = ProcessRegister { filter: self, tx };
-        attach_process_probe(&pr.filter, &mut bpfx.bpf, &bpfx.btf)?;
+        let link_id = attach_process_probe(&pr.filter, &mut bpfx.bpf, &bpfx.btf)?;
+        bpfx.link_id_type = link_id;
         bpfx.process = Some(pr);
 
         Ok(PollProcess { rx })
+    }
+}
+
+impl BitOr for ProcessFilter {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self {
+            mask: self.mask | rhs.mask,
+            filter: self.filter,
+        }
     }
 }
 

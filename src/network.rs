@@ -1,13 +1,14 @@
-use crate::error::*;
 use crate::{
     Bpfx,
     common::EventHeader,
     core::{Subscription, attach_network_probe},
 };
+use crate::{ProcessId, error::*};
 use bpfx_common::raw::FilterKey;
 use core::fmt;
 use futures::Stream;
 use std::fmt::Display;
+use std::time::Duration;
 use std::{
     net::IpAddr,
     ops::{BitOr, BitOrAssign},
@@ -209,7 +210,9 @@ impl Subscription for NetworkFilter {
 
         let reg = NetworkRegister { filter: self, tx };
 
-        attach_network_probe(&reg.filter, &mut bpfx.bpf, &bpfx.btf)?;
+        let link_ids = attach_network_probe(&reg.filter, &mut bpfx.bpf, &bpfx.btf)?;
+
+        bpfx.link_id_type = link_ids;
 
         bpfx.network = Some(reg);
 
@@ -396,6 +399,18 @@ impl Display for NetworkEvent {
 }
 
 impl NetworkEvent {
+    pub fn process(&self) -> ProcessId {
+        self.header().process()
+    }
+
+    pub fn timestamp(&self) -> Duration {
+        self.header().timestamp()
+    }
+
+    pub fn is_kernel_thread(&self) -> bool {
+        self.header().is_kernel_thread()
+    }
+
     fn protocol(&self) -> &Protocol {
         match self {
             Self::Connect(e) => &e.protocol,
@@ -431,6 +446,18 @@ impl NetworkEvent {
             Self::Close(e) => &e.endpoints,
             Self::Bind(e) => &e.endpoints,
             Self::Listen(e) => &e.endpoints,
+        }
+    }
+}
+
+impl BitOr for NetworkFilter {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self {
+            protocol_mask: self.protocol_mask,
+            event_mask: self.event_mask | rhs.event_mask,
+            filter: self.filter,
         }
     }
 }

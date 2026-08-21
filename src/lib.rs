@@ -9,7 +9,7 @@ pub use common::{EventHeader, ProcessId};
 pub use core::{Bpfx, BpfxConfig};
 
 // File
-pub use file::{FileEvent, FileFilter, FileMask, FileType, FileTypeFilter, PollFile};
+pub use file::{FileEvent, FileEventKey, FileFilter, FileMask, FileType, FileTypeFilter, PollFile};
 
 // Memory
 pub use memory::{MemoryEvent, MemoryFilter, MemoryMask, PollMem};

@@ -1,5 +1,3 @@
->Note: WIP, api's may change.
-
 # bpfx
 
 `bpfx` provides a simple API for monitoring process, file, memory, and network
@@ -24,15 +22,6 @@ events without writing eBPF programs yourself.
 
 ```bash
 cargo add bpfx futures tokio
-```
-
->Or clone this repo and use it directly by adding :
-
-```bash
-[dependencies]
-bpfx = { path = "/path/to/repo/bpfx" }
-tokio = { version = "1", features = ["full"] }
-futures = "0.3"
 ```
 
 ## Quick Start

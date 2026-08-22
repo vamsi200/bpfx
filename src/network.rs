@@ -230,9 +230,7 @@ impl Subscription for NetworkFilter {
 
         let reg = NetworkRegister { filter: self, tx };
 
-        let link_ids = attach_network_probe(&reg.filter, &mut bpfx.bpf, &bpfx.btf)?;
-
-        bpfx.link_id_type = link_ids;
+        attach_network_probe(&reg.filter, &mut bpfx.bpf, &bpfx.btf)?;
 
         bpfx.network = Some(reg);
 

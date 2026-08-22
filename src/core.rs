@@ -17,11 +17,6 @@ use crate::{
 };
 use aya::maps::MapData;
 use aya::maps::ring_buf::RingBufItem;
-use aya::programs::fentry::FEntryLinkId;
-use aya::programs::fexit::FExitLinkId;
-use aya::programs::kprobe::KProbeLinkId;
-use aya::programs::lsm::LsmLinkId;
-use aya::programs::trace_point::TracePointLinkId;
 use aya::programs::{Lsm, TracePoint};
 use aya::{
     Btf, Ebpf, include_bytes_aligned,
@@ -41,14 +36,6 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 
 const MAX_PENDING_RENAMES: usize = 1024;
 
-pub(crate) enum LinkIdType {
-    Exit(FExitLinkId),
-    FEntry(FEntryLinkId),
-    Kprobe(KProbeLinkId),
-    TracePoint(TracePointLinkId),
-    Lsm(LsmLinkId),
-}
-
 /// Configuration options for a [`Bpfx`] runtime.
 ///
 /// Use [`Bpfx::with_config`] to create a runtime with custom settings.
@@ -65,6 +52,17 @@ impl Default for BpfxConfig {
         Self {
             channel_capacity: 1024,
         }
+    }
+}
+
+impl BpfxConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn channel_capacity(mut self, capacity: usize) -> Self {
+        self.channel_capacity = capacity;
+        self
     }
 }
 
@@ -91,11 +89,13 @@ impl Default for BpfxConfig {
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut bpfx = Bpfx::new()?;
 ///
-/// let _events = bpfx.subscribe(ProcessFilter::ALL)?;
+/// let events = bpfx.subscribe(ProcessFilter::ALL)?;
 ///
-/// let runtime = bpfx.run();
+/// let _runtime = bpfx.run();
 ///
-/// runtime.await??;
+/// while let Some(events) = events.next().await {
+///     // do something
+/// }
 /// # Ok(())
 /// # }
 /// ```
@@ -109,7 +109,6 @@ pub struct Bpfx {
     pub(crate) mem: Option<MemRegister>,
     pending_renames: HashMap<(u32, u32), RawFileRenameEvent>,
     pub config: BpfxConfig,
-    pub(crate) link_id_type: Vec<(LinkIdType, String)>,
 }
 
 /// A type that can register an event subscription with [`Bpfx`].
@@ -175,7 +174,6 @@ impl Bpfx {
             config: BpfxConfig {
                 channel_capacity: 1024,
             },
-            link_id_type: Vec::new(),
         })
     }
 
@@ -231,7 +229,6 @@ impl Bpfx {
             mem: None,
             pending_renames: HashMap::with_capacity(1000),
             config,
-            link_id_type: Vec::new(),
         })
     }
 
@@ -276,7 +273,15 @@ impl Bpfx {
     ///
     /// Panics if called outside of a Tokio runtime.
     pub fn run(self) -> tokio::task::JoinHandle<Result<()>> {
-        tokio::spawn(async move { self.event_loop().await })
+        tokio::spawn(async move {
+            log::info!("Bpfx runtime task started");
+
+            let result = self.event_loop().await;
+
+            log::info!("Bpfx event_loop() returned");
+
+            result
+        })
     }
 
     async fn event_loop(mut self) -> Result<()> {
@@ -289,7 +294,7 @@ impl Bpfx {
 
             if !self.has_subscribers() {
                 log::info!("all subscriptions dropped, shutting down event loop");
-                break Ok(());
+                break;
             }
 
             while let Some(events) = self.ringbuf.next() {
@@ -312,69 +317,8 @@ impl Bpfx {
 
             ready.clear_ready();
         }
-    }
-
-    pub fn destroy(&mut self) -> Result<()> {
-        let mut handles = Vec::new();
-
-        for (id, name) in self.link_id_type.drain(..) {
-            match id {
-                LinkIdType::Exit(id) => {
-                    let program: &mut FExit =
-                        self.bpf.program_mut(&name).unwrap().try_into().unwrap();
-
-                    if let Ok(link) = program.take_link(id) {
-                        handles.push(std::thread::spawn(move || drop(link)));
-                    }
-                }
-                LinkIdType::FEntry(id) => {
-                    let program: &mut FEntry =
-                        self.bpf.program_mut(&name).unwrap().try_into().unwrap();
-
-                    if let Ok(link) = program.take_link(id) {
-                        handles.push(std::thread::spawn(move || drop(link)));
-                    }
-                }
-                LinkIdType::Kprobe(id) => {
-                    let program: &mut KProbe =
-                        self.bpf.program_mut(&name).unwrap().try_into().unwrap();
-
-                    if let Ok(link) = program.take_link(id) {
-                        handles.push(std::thread::spawn(move || drop(link)));
-                    }
-                }
-                LinkIdType::TracePoint(id) => {
-                    let program: &mut TracePoint =
-                        self.bpf.program_mut(&name).unwrap().try_into().unwrap();
-
-                    if let Ok(link) = program.take_link(id) {
-                        handles.push(std::thread::spawn(move || drop(link)));
-                    }
-                }
-                LinkIdType::Lsm(id) => {
-                    let program: &mut Lsm =
-                        self.bpf.program_mut(&name).unwrap().try_into().unwrap();
-
-                    if let Ok(link) = program.take_link(id) {
-                        handles.push(std::thread::spawn(move || drop(link)));
-                    }
-                }
-            }
-        }
-
-        for h in handles {
-            let _ = h.join();
-        }
 
         Ok(())
-    }
-}
-
-impl Drop for Bpfx {
-    fn drop(&mut self) {
-        if let Err(e) = self.destroy() {
-            log::error!("Failed to manually destroy LinkId's: {e}");
-        }
     }
 }
 
@@ -546,7 +490,7 @@ fn attach_fexit(
     btf: &Btf,
     prog_name: &'static str,
     func_name: &'static str,
-) -> crate::error::Result<FExitLinkId> {
+) -> crate::error::Result<()> {
     log::info!("attaching fexit probe '{}' to '{}'", prog_name, func_name);
     let prog: &mut FExit = bpf
         .program_mut(prog_name)
@@ -554,14 +498,15 @@ fn attach_fexit(
         .try_into()?;
 
     prog.load(func_name, btf)?;
-    Ok(prog.attach()?)
+    prog.attach()?;
+    Ok(())
 }
 
 fn attach_kprobe(
     bpf: &mut Ebpf,
     prog_name: &'static str,
     symbol: &'static str,
-) -> crate::error::Result<KProbeLinkId> {
+) -> crate::error::Result<()> {
     log::info!("attaching kprobe probe '{}' to '{}'", prog_name, symbol);
 
     let prog: &mut KProbe = bpf
@@ -570,7 +515,8 @@ fn attach_kprobe(
         .try_into()?;
 
     prog.load()?;
-    Ok(prog.attach(symbol, 0)?)
+    prog.attach(symbol, 0)?;
+    Ok(())
 }
 
 fn attach_fentry(
@@ -578,7 +524,7 @@ fn attach_fentry(
     btf: &Btf,
     prog_name: &'static str,
     symbol: &'static str,
-) -> crate::error::Result<FEntryLinkId> {
+) -> crate::error::Result<()> {
     log::info!("attaching fentry probe '{}' to '{}'", prog_name, symbol);
 
     let prog: &mut FEntry = bpf
@@ -587,7 +533,8 @@ fn attach_fentry(
         .try_into()?;
 
     prog.load(symbol, btf)?;
-    Ok(prog.attach()?)
+    prog.attach()?;
+    Ok(())
 }
 
 fn attach_tracepoint(
@@ -595,7 +542,7 @@ fn attach_tracepoint(
     prog_name: &'static str,
     category: &'static str,
     tracepoint: &'static str,
-) -> crate::error::Result<TracePointLinkId> {
+) -> crate::error::Result<()> {
     log::info!(
         "attaching tracepoint probe '{}' to '{}'",
         prog_name,
@@ -608,7 +555,8 @@ fn attach_tracepoint(
         .try_into()?;
 
     prog.load()?;
-    Ok(prog.attach(category, tracepoint)?)
+    prog.attach(category, tracepoint)?;
+    Ok(())
 }
 
 fn handle_connect(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) {
@@ -721,17 +669,15 @@ pub(crate) fn attach_network_probe(
     filter: &NetworkFilter,
     bpf: &mut Ebpf,
     btf: &Btf,
-) -> crate::error::Result<Vec<(LinkIdType, String)>> {
+) -> crate::error::Result<()> {
     log::info!("attaching network probe..");
     write_to_fiter_map(&Filters::Network(filter), FilterOwner::Network, bpf)?;
-    let mut link_ids: Vec<(LinkIdType, String)> = Vec::new();
 
     if filter.protocol_mask.contains(&ProtocolMask::TCP)
         && filter.event_mask.contains(&NetworkMask::CONNECT)
     {
         for probe in TCP_CONNECT {
-            let id = attach_fexit(bpf, btf, probe.0, probe.1)?;
-            link_ids.push((LinkIdType::Exit(id), probe.0.to_owned()));
+            attach_fexit(bpf, btf, probe.0, probe.1)?;
         }
     }
 
@@ -739,50 +685,44 @@ pub(crate) fn attach_network_probe(
         && filter.event_mask.contains(&NetworkMask::ACCEPT)
     {
         for probe in TCP_ACCEPT {
-            let id = attach_kprobe(bpf, probe.0, probe.1)?;
-            link_ids.push((LinkIdType::Kprobe(id), probe.0.to_owned()));
+            attach_kprobe(bpf, probe.0, probe.1)?;
         }
     }
 
     if filter.protocol_mask.contains(&ProtocolMask::TCP)
         && filter.event_mask.contains(&NetworkMask::CLOSE)
     {
-        let id = attach_fexit(bpf, btf, TCP_CLOSE.0, TCP_CLOSE.1)?;
-        link_ids.push((LinkIdType::Exit(id), TCP_CLOSE.0.to_owned()));
+        attach_fexit(bpf, btf, TCP_CLOSE.0, TCP_CLOSE.1)?;
     }
 
     if filter.protocol_mask.contains(&ProtocolMask::TCP)
         && filter.event_mask.contains(&NetworkMask::BIND)
     {
-        let id = attach_fexit(bpf, btf, "inet_bind", "inet_bind")?;
-        link_ids.push((LinkIdType::Exit(id), "inet_bind".to_owned()));
+        attach_fexit(bpf, btf, "inet_bind", "inet_bind")?;
     }
 
     if filter.protocol_mask.contains(&ProtocolMask::TCP)
         && filter.event_mask.contains(&NetworkMask::LISTEN)
     {
-        let id = attach_fexit(bpf, btf, "inet_listen", "inet_listen")?;
-        link_ids.push((LinkIdType::Exit(id), "inet_listen".to_owned()));
+        attach_fexit(bpf, btf, "inet_listen", "inet_listen")?;
     }
 
     if filter.protocol_mask.contains(&ProtocolMask::UDP)
         && filter.event_mask.contains(&NetworkMask::CONNECT)
     {
         for probe in UDP_CONNECT {
-            let id = attach_fexit(bpf, btf, probe.0, probe.1)?;
-            link_ids.push((LinkIdType::Exit(id), probe.0.to_owned()));
+            attach_fexit(bpf, btf, probe.0, probe.1)?;
         }
     }
 
     if filter.protocol_mask.contains(&ProtocolMask::UDP)
         && filter.event_mask.contains(&NetworkMask::CLOSE)
     {
-        let id = attach_fexit(bpf, btf, UDP_CLOSE.0, UDP_CLOSE.1)?;
-        link_ids.push((LinkIdType::Exit(id), UDP_CLOSE.0.to_owned()));
+        attach_fexit(bpf, btf, UDP_CLOSE.0, UDP_CLOSE.1)?;
     }
 
     log::info!("attached network probe");
-    Ok(link_ids)
+    Ok(())
 }
 
 fn handle_bind(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) {
@@ -851,29 +791,24 @@ pub(crate) fn attach_process_probe(
     filter: &ProcessFilter,
     bpf: &mut Ebpf,
     btf: &Btf,
-) -> crate::error::Result<Vec<(LinkIdType, String)>> {
-    let mut link_ids: Vec<(LinkIdType, String)> = Vec::new();
-
+) -> crate::error::Result<()> {
     write_to_fiter_map(&Filters::Process(filter), FilterOwner::Process, bpf)?;
 
     if filter.mask.contains(&ProcessMask::START) {
-        let id = attach_tracepoint(bpf, "sched_process_exec", "sched", "sched_process_exec")?;
-        link_ids.push((LinkIdType::TracePoint(id), "sched_process_exec".to_owned()));
+        attach_tracepoint(bpf, "sched_process_exec", "sched", "sched_process_exec")?;
     }
 
     if filter.mask.contains(&ProcessMask::FORK) {
-        let id = attach_tracepoint(bpf, "sched_process_fork", "sched", "sched_process_fork")?;
-        link_ids.push((LinkIdType::TracePoint(id), "sched_process_fork".to_owned()));
+        attach_tracepoint(bpf, "sched_process_fork", "sched", "sched_process_fork")?;
     }
 
     if filter.mask.contains(&ProcessMask::EXIT) {
-        let id = attach_fentry(bpf, btf, "do_group_exit", "do_group_exit")?;
-        link_ids.push((LinkIdType::FEntry(id), "do_group_exit".to_owned()));
+        attach_fentry(bpf, btf, "do_group_exit", "do_group_exit")?;
     }
 
     log::info!("attached process probe");
 
-    Ok(link_ids)
+    Ok(())
 }
 
 fn convert_header(header: RawEventHeader) -> EventHeader {
@@ -991,62 +926,53 @@ pub(crate) fn attach_file_probe(
     filter: &FileFilter,
     bpf: &mut Ebpf,
     btf: &Btf,
-) -> crate::error::Result<Vec<(LinkIdType, String)>> {
+) -> crate::error::Result<()> {
     write_to_fiter_map(&Filters::File(filter), FilterOwner::File, bpf)?;
     write_to_map(bpf, filter)?;
 
-    let mut link_ids: Vec<(LinkIdType, String)> = Vec::new();
+    attach_lsm_probe(bpf, btf)?;
 
-    let id = attach_lsm_probe(bpf, btf)?;
-
-    link_ids.push((LinkIdType::Lsm(id), "file_open".to_owned()));
-
-    let id = attach_fexit(bpf, btf, "__fput", "__fput")?;
-    link_ids.push((LinkIdType::Exit(id), "__fput".to_owned()));
+    attach_fexit(bpf, btf, "__fput", "__fput")?;
 
     if filter.event_type.contains(&FileMask::OPEN) {
-        let id = attach_fexit(bpf, btf, "vfs_open", "vfs_open")?;
-        link_ids.push((LinkIdType::Exit(id), "vfs_open".to_owned()));
+        attach_fexit(bpf, btf, "vfs_open", "vfs_open")?;
     }
 
     if filter.event_type.contains(&FileMask::CLOSE) {
-        let id = attach_fexit(bpf, btf, "filp_close", "filp_close")?;
-        link_ids.push((LinkIdType::Exit(id), "filp_close".to_owned()));
+        attach_fexit(bpf, btf, "filp_close", "filp_close")?;
     }
 
     if filter.event_type.contains(&FileMask::READ) {
-        let id = attach_fexit(bpf, btf, "vfs_read", "vfs_read")?;
-        link_ids.push((LinkIdType::Exit(id), "vfs_read".to_owned()));
+        attach_fexit(bpf, btf, "vfs_read", "vfs_read")?;
     }
 
     if filter.event_type.contains(&FileMask::WRITE) {
-        let id = attach_fexit(bpf, btf, "vfs_write", "vfs_write")?;
-        link_ids.push((LinkIdType::Exit(id), "vfs_write".to_owned()));
+        attach_fexit(bpf, btf, "vfs_write", "vfs_write")?;
     }
 
     if filter.event_type.contains(&FileMask::DELETE) {
-        let id = attach_fexit(bpf, btf, "vfs_unlink", "vfs_unlink")?;
-        link_ids.push((LinkIdType::Exit(id), "vfs_unlink".to_owned()));
+        attach_fexit(bpf, btf, "vfs_unlink", "vfs_unlink")?;
     }
 
     if filter.event_type.contains(&FileMask::RENAME) {
-        let id = attach_fentry(bpf, btf, "vfs_rename", "vfs_rename")?;
-        link_ids.push((LinkIdType::FEntry(id), "vfs_rename".to_owned()));
-        let id = attach_fexit(bpf, btf, "vfs_rename_retval", "vfs_rename")?;
-        link_ids.push((LinkIdType::Exit(id), "vfs_rename_retval".to_owned()));
+        attach_fentry(bpf, btf, "vfs_rename", "vfs_rename")?;
+
+        attach_fexit(bpf, btf, "vfs_rename_retval", "vfs_rename")?;
     }
 
     log::info!("attached file probe");
 
-    Ok(link_ids)
+    Ok(())
 }
 
-fn attach_lsm_probe(bpf: &mut Ebpf, btf: &Btf) -> Result<LsmLinkId> {
+fn attach_lsm_probe(bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
     let program: &mut Lsm = bpf.program_mut("file_open").unwrap().try_into()?;
 
     program.load("file_open", &btf)?;
 
-    Ok(program.attach()?)
+    program.attach()?;
+
+    Ok(())
 }
 
 fn convert_file_events(
@@ -1305,23 +1231,20 @@ pub(crate) fn attach_mem_probe(
     filter: &MemoryFilter,
     bpf: &mut Ebpf,
     btf: &Btf,
-) -> crate::error::Result<Vec<(LinkIdType, String)>> {
+) -> crate::error::Result<()> {
     write_to_fiter_map(&Filters::Memory(filter), FilterOwner::Memory, bpf)?;
 
-    let mut link_ids: Vec<(LinkIdType, String)> = Vec::new();
     if filter.mask.contains(MemoryMask::MMAP) {
-        let id = attach_fexit(bpf, btf, "vm_mmap_pgoff", "vm_mmap_pgoff")?;
-        link_ids.push((LinkIdType::Exit(id), "vm_mmap_pgoff".to_owned()));
+        attach_fexit(bpf, btf, "vm_mmap_pgoff", "vm_mmap_pgoff")?;
     }
 
     if filter.mask.contains(MemoryMask::UNMAP) {
-        let id = attach_fexit(bpf, btf, "__vm_munmap", "__vm_munmap")?;
-        link_ids.push((LinkIdType::Exit(id), "__vm_munmap".to_owned()));
+        attach_fexit(bpf, btf, "__vm_munmap", "__vm_munmap")?;
     }
 
     log::info!("attached memory probe");
 
-    Ok(link_ids)
+    Ok(())
 }
 
 fn convert_mem_events(

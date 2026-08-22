@@ -869,8 +869,7 @@ impl Subscription for FileFilter {
 
         let reg = FileRegister { filter: self, tx };
 
-        let ids = attach_file_probe(&reg.filter, &mut bpfx.bpf, &bpfx.btf)?;
-        bpfx.link_id_type = ids;
+        attach_file_probe(&reg.filter, &mut bpfx.bpf, &bpfx.btf)?;
 
         bpfx.file = Some(reg);
 

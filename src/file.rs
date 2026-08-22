@@ -955,7 +955,7 @@ impl FileFilter {
 ///
 /// ```rust
 /// # use bpfx::file::FileTypeFilter;
-/// let types = FileTypeFilter::FILE_REG | UserFileFilter::FILE_DIR;
+/// let types = FileTypeFilter::FILE_REG;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileTypeFilter(pub FileModeFilter);

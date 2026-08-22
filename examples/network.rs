@@ -1,22 +1,15 @@
-use bpfx::{
-    Bpfx, NetworkEvent,
-    network::{NetworkFilter, NetworkMask, ProtocolMask},
-};
+use bpfx::{Bpfx, NetworkEvent, network::NetworkFilter};
 use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bpfx = Bpfx::new()?;
 
-    let mut events = bpfx.subscribe(NetworkFilter {
-        protocol_mask: ProtocolMask::TCP,
-        event_mask: NetworkMask::CONNECT,
-        ..Default::default()
-    })?;
+    let mut events = bpfx.subscribe(NetworkFilter::ALL)?;
 
     let _runtime = bpfx.run();
 
-    println!("Watching network activity...\n");
+    println!("Watching network activity (Ctrl+C to exit)...");
 
     while let Some(event) = events.next().await {
         match event {

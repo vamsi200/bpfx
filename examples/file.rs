@@ -1,7 +1,4 @@
-use bpfx::{
-    Bpfx,
-    file::{FileFilter, FileMask, FileTypeFilter},
-};
+use bpfx::{Bpfx, FileEvent, file::FileFilter};
 use futures::StreamExt;
 
 #[tokio::main]
@@ -9,13 +6,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bpfx = Bpfx::new()?;
 
     // Watch successful opens and renames of regular files.
-    let mut events = bpfx.subscribe(FileFilter {
-        event_type: FileMask::OPEN | FileMask::RENAME,
-        file_mode: FileTypeFilter::FILE_REG,
-        ..Default::default()
-    })?;
+    let mut events = bpfx.subscribe(FileFilter::ALL)?;
 
-    let _runtime = bpfx.run();
+    bpfx.run();
 
     println!("Watching file events (Ctrl+C to exit)...");
 
@@ -25,13 +18,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         match event {
-            bpfx::file::FileEvent::Open(e) => {
-                println!("{e:?}");
+            FileEvent::Open(e) => {
+                if e.file_name().contains("passwd") || e.file_path.contains("passwd") {
+                    println!("{e}");
+                }
             }
 
-            // bpfx::file::FileEvent::Rename(e) => {
-            //     println!("{e}");
-            // }
+            FileEvent::Rename(e) => {
+                println!("{e}");
+            }
             _ => {}
         }
     }

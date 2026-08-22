@@ -1,6 +1,6 @@
 [package]
 name = "bpfx"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A high-level Rust library for eBPF-based observability."
 readme = "README.md"
@@ -19,7 +19,7 @@ include = [
 
 [dependencies]
 aya = "0.13.1"
-bpfx-common = { version = "0.1.0", path = "./bpfx-common", features = ["user"] }
+bpfx-common = { version = "0.2.0", path = "./bpfx-common", features = ["user"] }
 tokio = { version = "1.52.3", features = [
     "rt-multi-thread",
     "macros",

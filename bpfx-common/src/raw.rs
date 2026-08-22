@@ -197,7 +197,7 @@ use aya::Pod;
 /// This type is shared with the eBPF program and is not intended for
 /// direct construction by users.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
 pub struct FileModeFilter {
     pub mode: u16,
 }
@@ -275,7 +275,7 @@ pub struct RawMemoryUnmapEvent {
 /// };
 /// ```
 #[repr(u32)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum FilterKey {
     /// Do not apply additional filtering.

@@ -100,7 +100,11 @@ impl Stream for PollMem {
 /// This enum is marked as `non_exhaustive` and may gain additional variants
 /// in future releases.
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum MemoryEvent {
     MemoryMap(MemoryMapEvent),
     MemoryUnMap(MemoryUnmapEvent),
@@ -158,7 +162,11 @@ impl MemoryEvent {
 /// # use bpfx::memory::MemoryMask;
 /// let mask = MemoryMask::MMAP | MemoryMask::UNMAP;
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct MemoryMask(u8);
 
 impl MemoryMask {
@@ -203,7 +211,7 @@ impl BitOrAssign for MemoryMask {
 ///     filter: FilterKey::Pid(1234),
 /// };
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MemoryFilter {
     pub mask: MemoryMask,
     pub filter: FilterKey,
@@ -214,7 +222,7 @@ pub struct MemoryFilter {
 /// A registration owns the [`MemoryFilter`] used to configure the attached
 /// probes and the channel through which matching [`MemoryEvent`]s are
 /// delivered to the associated [`PollMem`] stream.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct MemRegister {
     pub filter: MemoryFilter,
     pub tx: Sender<MemoryEvent>,

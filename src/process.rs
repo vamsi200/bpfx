@@ -94,7 +94,11 @@ impl Display for ProcessForkEvent {
 /// This enum is marked as `non_exhaustive` and may gain additional variants
 /// in future releases.
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum ProcessEvent {
     Start(ProcessStartEvent),
     Fork(ProcessForkEvent),
@@ -185,6 +189,10 @@ impl Stream for PollProcess {
 /// let mask = ProcessMask::START | ProcessMask::EXIT;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct ProcessMask(u8);
 
 impl ProcessMask {
@@ -237,7 +245,7 @@ impl BitOrAssign for ProcessMask {
 ///     filter: FilterKey::Uid(1000),
 /// };
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProcessFilter {
     /// Bitmask specifying which process event types should be observed.
     pub mask: ProcessMask,
@@ -250,7 +258,7 @@ pub struct ProcessFilter {
 ///
 /// Stores the active filter and the channel used to deliver events
 /// to the corresponding event stream.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ProcessRegister {
     pub filter: ProcessFilter,
     pub tx: Sender<ProcessEvent>,

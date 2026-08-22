@@ -515,7 +515,7 @@ pub enum FileEventKey {
 
     Open { inode: u64, flags: u32 },
 
-    Close { inode: u64 },
+    Close { inode: u64, retval: i32 },
 
     Rename { retval: i32 },
 
@@ -544,7 +544,10 @@ impl FileEvent {
                 retval: e.retval,
             },
 
-            FileEvent::Close(e) => FileEventKey::Close { inode: e.inode },
+            FileEvent::Close(e) => FileEventKey::Close {
+                inode: e.inode,
+                retval: e.retval,
+            },
 
             FileEvent::Rename(e) => FileEventKey::Rename { retval: e.retval },
 
@@ -820,10 +823,10 @@ impl BitOrAssign for FileMask {
 /// let filter = FileFilter {
 ///     event_type: FileMask::OPEN | FileMask::RENAME,
 ///     file_mode: FileTypeFilter::FILE_REG,
-///     ..Default::default()
+///     filter: FilterKey::default()
 /// };
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileFilter {
     pub event_type: FileMask,
     pub file_mode: FileTypeFilter,
@@ -845,7 +848,7 @@ impl Default for FileFilter {
 /// A registration owns the [`FileFilter`] used to configure the attached
 /// probes and the channel through which matching [`FileEvent`]s are
 /// delivered to the associated [`PollFile`] stream.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct FileRegister {
     pub filter: FileFilter,
     pub tx: Sender<FileEvent>,
@@ -954,7 +957,7 @@ impl FileFilter {
 /// # use bpfx::file::FileTypeFilter;
 /// let types = FileTypeFilter::FILE_REG | UserFileFilter::FILE_DIR;
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileTypeFilter(pub FileModeFilter);
 
 impl FileTypeFilter {

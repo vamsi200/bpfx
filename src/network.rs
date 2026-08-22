@@ -97,6 +97,10 @@ impl Stream for PollNetwork {
 /// let protocols = ProtocolMask::TCP | ProtocolMask::UDP;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct ProtocolMask(u8);
 
 impl ProtocolMask {
@@ -133,6 +137,10 @@ impl BitOrAssign for ProtocolMask {
 /// let mask = NetworkMask::CONNECT | NetworkMask::CLOSE;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct NetworkMask(u8);
 
 impl NetworkMask {
@@ -184,7 +192,7 @@ impl BitOrAssign for NetworkMask {
 ///     filter: FilterKey::Pid(1234),
 /// };
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Hash)]
 pub struct NetworkFilter {
     pub protocol_mask: ProtocolMask,
     pub event_mask: NetworkMask,
@@ -407,6 +415,10 @@ impl Display for ListenEvent {
 /// in future releases.
 #[non_exhaustive]
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub enum NetworkEvent {
     Connect(ConnectEvent),
     Accept(AcceptEvent),

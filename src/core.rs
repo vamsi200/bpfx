@@ -39,6 +39,10 @@ const MAX_PENDING_RENAMES: usize = 1024;
 /// Configuration options for a [`Bpfx`] runtime.
 ///
 /// Use [`Bpfx::with_config`] to create a runtime with custom settings.
+/// # Example
+/// ```no_run
+/// let mut bpfx = Bpfx::with_config(BpfxConfig::default().channel_capacity(10_000))?;
+/// ```
 #[non_exhaustive]
 pub struct BpfxConfig {
     /// Capacity of the per-subscription event channel.

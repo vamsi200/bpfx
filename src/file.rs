@@ -154,6 +154,7 @@ macro_rules! impl_file_info {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FileType {
     /// A regular file.
     Regular,
@@ -247,6 +248,7 @@ impl From<FileType> for u32 {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FileOpenEvent {
     pub header: EventHeader,
     pub file_path: String,
@@ -290,6 +292,7 @@ impl FileOpenEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FileCloseEvent {
     pub header: EventHeader,
     pub file_path: String,
@@ -333,6 +336,7 @@ impl FileCloseEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FileReadEvent {
     pub header: EventHeader,
     pub file_path: String,
@@ -376,6 +380,7 @@ impl Display for FileReadEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FileWriteEvent {
     pub header: EventHeader,
     pub file_path: String,
@@ -419,6 +424,7 @@ impl Display for FileWriteEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FileDeleteEvent {
     pub header: EventHeader,
     pub filename: String,
@@ -445,6 +451,7 @@ impl Display for FileDeleteEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FileRenameEvent {
     pub header: EventHeader,
     pub old_filename: String,

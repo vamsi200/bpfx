@@ -22,6 +22,7 @@ use tokio::sync::mpsc::Sender;
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ProcessStartEvent {
     pub header: EventHeader,
     pub filename: String,
@@ -41,6 +42,7 @@ impl Display for ProcessStartEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ProcessExitEvent {
     pub header: EventHeader,
     pub exit_code: i32,
@@ -67,6 +69,7 @@ impl ProcessExitEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ProcessForkEvent {
     pub parent: EventHeader,
     pub child_pid: u32,
@@ -99,6 +102,7 @@ impl Display for ProcessForkEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ProcessEvent {
     Start(ProcessStartEvent),
     Fork(ProcessForkEvent),
@@ -193,6 +197,7 @@ impl Stream for PollProcess {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ProcessMask(u8);
 
 impl ProcessMask {

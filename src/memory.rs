@@ -23,6 +23,7 @@ use tokio::sync::mpsc::Sender;
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MemoryMapEvent {
     pub header: EventHeader,
     pub requested_address: usize,
@@ -51,6 +52,7 @@ impl Display for MemoryMapEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MemoryUnmapEvent {
     pub header: EventHeader,
     pub requested_address: usize,
@@ -105,6 +107,7 @@ impl Stream for PollMem {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MemoryEvent {
     MemoryMap(MemoryMapEvent),
     MemoryUnMap(MemoryUnmapEvent),
@@ -167,6 +170,7 @@ impl MemoryEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MemoryMask(u8);
 
 impl MemoryMask {

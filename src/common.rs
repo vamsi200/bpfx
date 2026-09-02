@@ -27,6 +27,7 @@ pub struct ProcessId {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EventHeader {
     /// Event timestamp in nanoseconds.
     pub timestamp_ns: u64,

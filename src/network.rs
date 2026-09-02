@@ -21,6 +21,7 @@ use tokio::sync::mpsc::Sender;
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Protocol {
     Tcp = 1,
     Udp = 2,
@@ -43,6 +44,7 @@ impl Display for Protocol {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SocketEndpoints {
     /// IP address of the local socket endpoint.
     pub local_ip: IpAddr,
@@ -101,6 +103,7 @@ impl Stream for PollNetwork {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ProtocolMask(u8);
 
 impl ProtocolMask {
@@ -141,6 +144,7 @@ impl BitOrAssign for ProtocolMask {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NetworkMask(u8);
 
 impl NetworkMask {
@@ -285,6 +289,7 @@ impl NetworkFilter {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConnectEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
@@ -310,6 +315,7 @@ impl Display for ConnectEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AcceptEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
@@ -334,6 +340,7 @@ impl Display for AcceptEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CloseEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
@@ -359,6 +366,7 @@ impl Display for CloseEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BindEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
@@ -385,6 +393,7 @@ impl Display for BindEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ListenEvent {
     pub header: EventHeader,
     pub protocol: Protocol,
@@ -419,6 +428,7 @@ impl Display for ListenEvent {
     feature = "archive",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NetworkEvent {
     Connect(ConnectEvent),
     Accept(AcceptEvent),

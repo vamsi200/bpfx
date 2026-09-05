@@ -473,23 +473,23 @@ macro_rules! mem_event {
     };
 }
 
-const TCP_CONNECT: &[(&str, &str)] = &[
+pub(crate) const TCP_CONNECT: &[(&str, &str)] = &[
     ("tcp_v4_connect", "tcp_v4_connect"),
     ("tcp_v6_connect", "tcp_v6_connect"),
 ];
 
-const TCP_ACCEPT: &[(&str, &str)] = &[("inet_csk_accept", "inet_csk_accept")];
+pub(crate) const TCP_ACCEPT: &[(&str, &str)] = &[("inet_csk_accept", "inet_csk_accept")];
 
-const TCP_CLOSE: (&str, &str) = ("tcp_close", "tcp_close");
+pub(crate) const TCP_CLOSE: (&str, &str) = ("tcp_close", "tcp_close");
 
-const UDP_CONNECT: &[(&str, &str)] = &[
+pub(crate) const UDP_CONNECT: &[(&str, &str)] = &[
     ("udp_connect", "udp_connect"),
     ("udpv6_connect", "udpv6_connect"),
 ];
 
-const UDP_CLOSE: (&str, &str) = ("udp_destroy_sock", "udp_destroy_sock");
+pub(crate) const UDP_CLOSE: (&str, &str) = ("udp_destroy_sock", "udp_destroy_sock");
 
-fn attach_fexit(
+pub(crate) fn attach_fexit(
     bpf: &mut Ebpf,
     btf: &Btf,
     prog_name: &'static str,
@@ -506,7 +506,7 @@ fn attach_fexit(
     Ok(())
 }
 
-fn attach_kprobe(
+pub(crate) fn attach_kprobe(
     bpf: &mut Ebpf,
     prog_name: &'static str,
     symbol: &'static str,
@@ -523,7 +523,7 @@ fn attach_kprobe(
     Ok(())
 }
 
-fn attach_fentry(
+pub(crate) fn attach_fentry(
     bpf: &mut Ebpf,
     btf: &Btf,
     prog_name: &'static str,
@@ -541,7 +541,7 @@ fn attach_fentry(
     Ok(())
 }
 
-fn attach_tracepoint(
+pub(crate) fn attach_tracepoint(
     bpf: &mut Ebpf,
     prog_name: &'static str,
     category: &'static str,
@@ -969,7 +969,7 @@ pub(crate) fn attach_file_probe(
     Ok(())
 }
 
-fn attach_lsm_probe(bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
+pub(crate) fn attach_lsm_probe(bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
     let program: &mut Lsm = bpf.program_mut("file_open").unwrap().try_into()?;
 
     program.load("file_open", &btf)?;

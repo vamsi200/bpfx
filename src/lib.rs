@@ -5,6 +5,7 @@ pub mod file;
 pub mod memory;
 pub mod network;
 pub mod process;
+pub mod test;
 pub use common::{EventHeader, ProcessId};
 pub use core::{Bpfx, BpfxConfig};
 

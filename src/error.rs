@@ -38,6 +38,9 @@ pub enum Error {
 
     #[error("failed to access EVENTS ring buffer")]
     EventsMapAccess,
+
+    #[error("Malformed Event")]
+    MalformedEvent,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

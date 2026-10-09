@@ -27,6 +27,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             FileEvent::Rename(e) => {
                 println!("{e}");
             }
+            FileEvent::Read(e) => {
+                println!("{e}")
+            }
+            FileEvent::Close(e) => {
+                println!("{e}")
+            }
+            FileEvent::Delete(e) => {
+                println!("{e}")
+            }
+
             _ => {}
         }
     }

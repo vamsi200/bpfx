@@ -772,12 +772,22 @@ fn handle_listen(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) 
     }
 }
 
+fn check_size<T>(len: usize) -> Result<()> {
+    if len != std::mem::size_of::<T>() {
+        return Err(crate::error::Error::MalformedEvent);
+    }
+    Ok(())
+}
+
 pub fn convert_network_events(
     producer: &mpsc::Sender<NetworkEvent>,
     events: &RingBufItem<'_>,
 ) -> crate::error::Result<()> {
     let ptr = events.as_ptr();
-    let event = unsafe { ptr::read(ptr as *const PendingConnect) };
+
+    check_size::<PendingConnect>(events.len())?;
+
+    let event = unsafe { std::ptr::read_unaligned(ptr.cast::<PendingConnect>()) };
 
     match event.header.event_type {
         EventType::Connect => handle_connect(&event, producer),
@@ -838,11 +848,18 @@ fn convert_process_events(
     events: &RingBufItem<'_>,
 ) -> crate::error::Result<()> {
     let ptr = events.as_ptr();
-    let header = unsafe { ptr::read(ptr as *const RawEventHeader) };
+
+    if events.len() < std::mem::size_of::<RawEventHeader>() {
+        return Err(crate::error::Error::MalformedEvent);
+    }
+
+    let header = unsafe { std::ptr::read_unaligned(ptr as *const RawEventHeader) };
 
     match header.event_type {
         EventType::ProcessStart => {
-            let event = unsafe { ptr::read(ptr as *const RawProcessStartEvent) };
+            check_size::<RawProcessStartEvent>(events.len())?;
+
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawProcessStartEvent) };
 
             let file_name_len = event
                 .filename
@@ -866,7 +883,8 @@ fn convert_process_events(
         }
 
         EventType::ProcessExit => {
-            let event = unsafe { ptr::read(ptr as *const RawProcessExitEvent) };
+            check_size::<RawProcessExitEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawProcessExitEvent) };
 
             match producer.try_send(process_event!(
                 exit,
@@ -884,7 +902,8 @@ fn convert_process_events(
         }
 
         EventType::ProcessFork => {
-            let event = unsafe { ptr::read(ptr as *const RawProcessForkEvent) };
+            check_size::<RawProcessForkEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawProcessForkEvent) };
 
             let comm_len = event
                 .child_comm
@@ -912,7 +931,6 @@ fn convert_process_events(
 
     Ok(())
 }
-
 fn write_to_map(bpf: &mut Ebpf, filter: &FileFilter) -> crate::error::Result<()> {
     use aya::maps::HashMap;
 
@@ -985,11 +1003,17 @@ fn convert_file_events(
     pending_rename_map: &mut HashMap<(u32, u32), RawFileRenameEvent>,
 ) -> crate::error::Result<()> {
     let ptr = events.as_ptr();
-    let header = unsafe { ptr::read(ptr as *const RawEventHeader) };
+
+    if events.len() < size_of::<RawEventHeader>() {
+        return Err(crate::error::Error::MalformedEvent);
+    }
+    let header = unsafe { std::ptr::read_unaligned(ptr as *const RawEventHeader) };
 
     match header.event_type {
         EventType::FileOpen => {
-            let event = unsafe { ptr::read(ptr as *const RawFileOpenEvent) };
+            check_size::<RawFileOpenEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileOpenEvent) };
+
             let path_len = event
                 .file_path
                 .iter()
@@ -1018,7 +1042,8 @@ fn convert_file_events(
         }
 
         EventType::FileClose => {
-            let event = unsafe { ptr::read(ptr as *const RawFileCloseEvent) };
+            check_size::<RawFileCloseEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileCloseEvent) };
 
             let path_len = event
                 .file_path
@@ -1048,7 +1073,8 @@ fn convert_file_events(
         }
 
         EventType::FileRead => {
-            let event = unsafe { ptr::read(ptr as *const RawFileReadEvent) };
+            check_size::<RawFileReadEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileReadEvent) };
             let path_len = event
                 .file_path
                 .iter()
@@ -1077,7 +1103,9 @@ fn convert_file_events(
         }
 
         EventType::FileWrite => {
-            let event = unsafe { ptr::read(ptr as *const RawFileWriteEvent) };
+            check_size::<RawFileWriteEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileWriteEvent) };
+
             let path_len = event
                 .file_path
                 .iter()
@@ -1106,7 +1134,9 @@ fn convert_file_events(
         }
 
         EventType::FileDelete => {
-            let event = unsafe { ptr::read(ptr as *const RawFileDeleteEvent) };
+            check_size::<RawFileDeleteEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileDeleteEvent) };
+
             let path_len = event
                 .file_name
                 .iter()
@@ -1133,7 +1163,9 @@ fn convert_file_events(
         }
 
         EventType::FileRename => {
-            let event = unsafe { ptr::read(ptr as *const RawFileRenameEvent) };
+            check_size::<RawFileRenameEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileRenameEvent) };
+
             let pid_tid = (event.header.pid, event.header.tid);
 
             if pending_rename_map.len() >= MAX_PENDING_RENAMES {
@@ -1154,8 +1186,8 @@ fn convert_file_events(
         }
 
         EventType::PendingFileRename => {
-            let ret_event = unsafe { ptr::read(ptr as *const RawFileRtrEvent) };
-
+            check_size::<RawFileRtrEvent>(events.len())?;
+            let ret_event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileRtrEvent) };
             let pid_tid = (ret_event.header.pid, ret_event.header.tid);
 
             if let Some(event) = pending_rename_map.remove(&pid_tid) {
@@ -1256,11 +1288,17 @@ fn convert_mem_events(
     events: &RingBufItem<'_>,
 ) -> crate::error::Result<()> {
     let ptr = events.as_ptr();
+    if events.len() < size_of::<RawEventHeader>() {
+        return Err(crate::error::Error::MalformedEvent);
+    }
+
     let header = unsafe { ptr::read(ptr as *const RawEventHeader) };
 
     match header.event_type {
         EventType::MemoryMap => {
-            let event = unsafe { ptr::read(ptr as *const RawMemoryMapEvent) };
+            check_size::<RawMemoryMapEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawMemoryMapEvent) };
+
             match producer.try_send(mem_event!(
                 MemoryMap,
                 MemoryMapEvent,
@@ -1282,7 +1320,9 @@ fn convert_mem_events(
         }
 
         EventType::MemoryUnMap => {
+            check_size::<RawMemoryUnmapEvent>(events.len())?;
             let event = unsafe { ptr::read(ptr as *const RawMemoryUnmapEvent) };
+
             match producer.try_send(mem_event!(
                 MemoryUnMap,
                 MemoryUnmapEvent,

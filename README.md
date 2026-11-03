@@ -17,7 +17,10 @@ events without writing eBPF programs yourself.
 
 - Linux with eBPF support
 - **Root privileges** (or the required capabilities)
-  
+
+## Docs
+- https://docs.rs/bpfx/latest/bpfx/
+
 ## Installation
 
 ```bash

@@ -220,7 +220,7 @@ pub struct RawFileWriteEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct RawFileDeleteEvent {
     pub header: RawEventHeader,
-    pub file_name: [u8; 256],
+    pub file_path: [u8; 256],
     pub file_mode: FileModeFilter,
     pub retval: i32,
 }
@@ -280,6 +280,8 @@ pub struct RawMemoryUnmapEvent {
 pub enum FilterKey {
     /// Do not apply additional filtering.
     None,
+    /// Match a specific string bytes
+    Path([u8; 256]),
     /// Match a specific process ID.
     Pid(u32),
     /// Match a specific thread ID.
@@ -292,8 +294,30 @@ pub enum FilterKey {
     Gid(u32),
 }
 
+#[cfg(feature = "user")]
+extern crate std;
+
+#[cfg(feature = "user")]
+impl FilterKey {
+    pub fn path(path: impl AsRef<std::path::Path>) -> Result<Self, &'static str> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let bytes = path.as_ref().as_os_str().as_bytes();
+
+        if bytes.len() >= 256 || bytes.contains(&0) {
+            return Err("Invalid path");
+        }
+
+        let mut buf = [0u8; 256];
+        buf[..bytes.len()].copy_from_slice(bytes);
+
+        Ok(Self::Path(buf))
+    }
+}
+
 #[non_exhaustive]
 #[repr(u32)]
+#[derive(PartialEq)]
 pub enum FilterOwner {
     Memory = 0,
     Process = 1,

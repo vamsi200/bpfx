@@ -43,6 +43,31 @@ static FILE_PATH_MAP: HashMap<u64, RawFilePath> = HashMap::with_max_entries(4 * 
 #[map]
 static PATH_BUF: PerCpuArray<[u8; 256]> = PerCpuArray::with_max_entries(1, 0);
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PendingUnlink {
+    dentry: u64,
+    path: [u8; 256],
+    file_mode: FileModeFilter,
+}
+
+#[map]
+static UNLINK_PENDING: HashMap<u64, PendingUnlink> = HashMap::with_max_entries(4096, 0);
+
+#[map]
+static UNLINK_TEMP: PerCpuArray<PendingUnlink> = PerCpuArray::with_max_entries(1, 0);
+
+#[map]
+static UNLINK_NAME_TEMP: PerCpuArray<[u8; 256]> = PerCpuArray::with_max_entries(1, 0);
+
+use aya_ebpf::helpers::r#gen::bpf_snprintf;
+
+#[map]
+static UNLINK_PARENT_TEMP: PerCpuArray<[u8; 256]> = PerCpuArray::with_max_entries(1, 0);
+
+static UNLINK_PATH_FMT: [u8; 6] = *b"%s/%s\0";
+static UNLINK_ROOT_FMT: [u8; 5] = *b"%s%s\0";
+
 pub struct SockAddrIn {
     pub sin_family: u16,
     pub sin_port: u16,
@@ -169,7 +194,7 @@ fn emit_v4(
     };
 
     let header = build_event_header(event_type);
-    if filter_events(FilterOwner::Network, &header) {
+    if filter_events(FilterOwner::Network, &header, None, None) {
         events.discard(0);
         return Ok(0);
     }
@@ -211,7 +236,7 @@ fn emit_v6(
         };
 
         let header = build_event_header(event_type);
-        if filter_events(FilterOwner::Network, &header) {
+        if filter_events(FilterOwner::Network, &header, None, None) {
             events.discard(0);
             return Ok(0);
         }
@@ -450,7 +475,7 @@ fn try_sched_process_exec(ctx: TracePointContext) -> Result<i32, i32> {
         };
 
         let header = build_event_header(EventType::ProcessStart);
-        if filter_events(FilterOwner::Process, &header) {
+        if filter_events(FilterOwner::Process, &header, None, None) {
             events.discard(0);
             return Ok(0);
         }
@@ -498,7 +523,7 @@ fn try_do_group_exit(ctx: FEntryContext) -> Result<i32, i32> {
         };
 
         let header = build_event_header(EventType::ProcessExit);
-        if filter_events(FilterOwner::Process, &header) {
+        if filter_events(FilterOwner::Process, &header, None, None) {
             events.discard(0);
             return Ok(0);
         }
@@ -546,6 +571,7 @@ fn try_file_open(ctx: LsmContext) -> Result<i32, i32> {
         let path =
             core::ptr::addr_of!((*file).__bindgen_anon_1.f_path) as *mut aya_ebpf::bindings::path;
 
+        path_buf.fill(0);
         let ret = bpf_d_path(path, path_buf.as_mut_ptr() as *mut _, path_buf.len() as u32);
 
         if ret < 0 {
@@ -581,11 +607,6 @@ fn try_vfs_open(ctx: FExitContext) -> Result<i32, i32> {
 
         let header = build_event_header(EventType::FileOpen);
 
-        if filter_events(FilterOwner::File, &header) {
-            events.discard(0);
-            return Ok(0);
-        }
-
         let file: *const file = ctx.arg(1);
 
         if file.is_null() {
@@ -609,6 +630,11 @@ fn try_vfs_open(ctx: FExitContext) -> Result<i32, i32> {
             events.discard(0);
             return Ok(0);
         };
+
+        if filter_events(FilterOwner::File, &header, Some(&file_path), None) {
+            events.discard(0);
+            return Ok(0);
+        }
 
         events.write(RawFileOpenEvent {
             header,
@@ -659,12 +685,12 @@ fn try_flip_close(ctx: FExitContext) -> Result<i32, i32> {
 
         let header = build_event_header(EventType::FileClose);
 
-        if filter_events(FilterOwner::File, &header) {
+        let file: *const file = ctx.arg(0);
+
+        if file.is_null() {
             events.discard(0);
             return Ok(0);
         }
-
-        let file: *const file = ctx.arg(0);
 
         let flags = (*file).f_flags;
 
@@ -687,6 +713,11 @@ fn try_flip_close(ctx: FExitContext) -> Result<i32, i32> {
             events.discard(0);
             return Ok(0);
         };
+
+        if filter_events(FilterOwner::File, &header, Some(&file_path), None) {
+            events.discard(0);
+            return Ok(0);
+        }
 
         events.write(RawFileCloseEvent {
             header,
@@ -719,7 +750,7 @@ fn try_sched_process_fork(ctx: TracePointContext) -> Result<i32, i32> {
         };
 
         let header = build_event_header(EventType::ProcessFork);
-        if filter_events(FilterOwner::Process, &header) {
+        if filter_events(FilterOwner::Process, &header, None, None) {
             events.discard(0);
             return Ok(0);
         }
@@ -813,11 +844,6 @@ fn try_vfs_read(ctx: FExitContext) -> Result<i32, i32> {
 
         let header = build_event_header(EventType::FileRead);
 
-        if filter_events(FilterOwner::File, &header) {
-            events.discard(0);
-            return Ok(0);
-        }
-
         let file: *const file = ctx.arg(0);
         if file.is_null() {
             events.discard(0);
@@ -837,6 +863,11 @@ fn try_vfs_read(ctx: FExitContext) -> Result<i32, i32> {
             events.discard(0);
             return Ok(0);
         };
+
+        if filter_events(FilterOwner::File, &header, Some(&file_path), None) {
+            events.discard(0);
+            return Ok(0);
+        }
 
         let flags = (*file).f_flags;
         events.write(RawFileReadEvent {
@@ -871,11 +902,6 @@ fn try_vfs_write(ctx: FExitContext) -> Result<i32, i32> {
 
         let header = build_event_header(EventType::FileWrite);
 
-        if filter_events(FilterOwner::File, &header) {
-            events.discard(0);
-            return Ok(0);
-        }
-
         let file: *const file = ctx.arg(0);
 
         if file.is_null() {
@@ -896,6 +922,11 @@ fn try_vfs_write(ctx: FExitContext) -> Result<i32, i32> {
             events.discard(0);
             return Ok(0);
         };
+
+        if filter_events(FilterOwner::File, &header, Some(&file_path), None) {
+            events.discard(0);
+            return Ok(0);
+        }
 
         let flags = (*file).f_flags;
 
@@ -937,57 +968,206 @@ fn capture_inode(inode: *const inode) -> (bool, FileModeFilter) {
     }
 }
 
+#[lsm(hook = "path_unlink", sleepable)]
+pub fn path_unlink(ctx: LsmContext) -> i32 {
+    unsafe {
+        let ret: i32 = ctx.arg(2);
+
+        if ret != 0 {
+            return ret;
+        }
+
+        let tid = bpf_get_current_pid_tgid();
+
+        let _ = UNLINK_PENDING.remove(&tid);
+
+        let dir: *const aya_ebpf::bindings::path = ctx.arg(0);
+        let target: *const dentry = ctx.arg(1);
+
+        if dir.is_null() || target.is_null() {
+            return ret;
+        }
+
+        let inode = (*target).d_inode;
+
+        if inode.is_null() {
+            return ret;
+        }
+
+        let (capture, file_mode) = capture_inode(inode);
+
+        if !capture {
+            return ret;
+        }
+
+        let pending = match UNLINK_TEMP.get_ptr_mut(0) {
+            Some(ptr) => &mut *ptr,
+            None => return ret,
+        };
+
+        let parent = match UNLINK_PARENT_TEMP.get_ptr_mut(0) {
+            Some(ptr) => &mut *ptr,
+            None => return ret,
+        };
+
+        let name = match UNLINK_NAME_TEMP.get_ptr_mut(0) {
+            Some(ptr) => &mut *ptr,
+            None => return ret,
+        };
+
+        pending.dentry = target as u64;
+        pending.file_mode = file_mode;
+
+        pending.path.fill(0);
+
+        // Resolve the parent directory.
+        // bpf_d_path returns the length including NUL.
+        let parent_n = bpf_d_path(dir as *mut _, parent.as_mut_ptr() as *mut _, 256);
+
+        if parent_n <= 1 || parent_n > 256 {
+            return ret;
+        }
+
+        let name_ptr = match bpf_probe_read_kernel(core::ptr::addr_of!(
+            (*target).__bindgen_anon_1.d_name.name
+        )) {
+            Ok(ptr) => ptr,
+            Err(_) => return ret,
+        };
+
+        if name_ptr.is_null() {
+            return ret;
+        }
+
+        let name_n =
+            bpf_probe_read_kernel_str(name.as_mut_ptr() as *mut _, 256, name_ptr as *const _);
+
+        if name_n <= 1 || name_n > 256 {
+            return ret;
+        }
+
+        //  Reject truncation before formatting.
+        //  parent_n and name_n both include their
+        //  terminating NUL bytes.
+        let parent_len = parent_n as usize - 1;
+        let name_len = name_n as usize - 1;
+
+        // Root already contains '/'.
+        // "/" + "file" => "/file"
+
+        // Other parents require a separator:
+        // "/tmp" + "/" + "file" => "/tmp/file"
+        let is_root = parent_len == 1;
+
+        let separator_len = if is_root { 0usize } else { 1usize };
+
+        let required = parent_len + separator_len + name_len + 1;
+
+        if required > 256 {
+            return ret;
+        }
+
+        // bpf_snprintf expects an array of u64 arguments.
+        // For %s, each argument is a pointer to a
+        // NUL-terminated string.
+        let mut args = [parent.as_ptr() as u64, name.as_ptr() as u64];
+
+        let (fmt, fmt_len) = if is_root {
+            (UNLINK_ROOT_FMT.as_ptr(), 5usize)
+        } else {
+            (UNLINK_PATH_FMT.as_ptr(), 6usize)
+        };
+
+        let _ = fmt_len;
+
+        let written = bpf_snprintf(
+            pending.path.as_mut_ptr() as *mut _,
+            256,
+            fmt as *const _,
+            args.as_mut_ptr(),
+            core::mem::size_of_val(&args) as u32,
+        );
+
+        if written <= 0 || written > 256 {
+            return ret;
+        }
+
+        if written as usize != required {
+            return ret;
+        }
+
+        let _ = UNLINK_PENDING.insert(&tid, pending, 0);
+
+        ret
+    }
+}
+
 #[fexit]
 pub fn vfs_unlink(ctx: FExitContext) -> i32 {
-    match { try_vfs_unlink(ctx) } {
-        Ok(v) => v,
+    match try_vfs_unlink(ctx) {
+        Ok(ret) => ret,
         Err(_) => 0,
     }
 }
 
 fn try_vfs_unlink(ctx: FExitContext) -> Result<i32, i32> {
     unsafe {
-        let mut events = match EVENTS.reserve::<RawFileDeleteEvent>(0) {
-            Some(s) => s,
-            None => return Ok(0),
+        let tid = bpf_get_current_pid_tgid();
+        let target: *const dentry = ctx.arg(2);
+
+        let result = try_emit_unlink(ctx, tid, target);
+
+        let _ = UNLINK_PENDING.remove(&tid);
+        result
+    }
+}
+
+fn try_emit_unlink(ctx: FExitContext, tid: u64, target: *const dentry) -> Result<i32, i32> {
+    unsafe {
+        if target.is_null() {
+            return Ok(0);
+        }
+
+        let retval: i32 = ctx.arg(4);
+
+        if retval != 0 {
+            return Ok(0);
+        }
+
+        let pending = match UNLINK_PENDING.get(&tid) {
+            Some(p) if p.dentry == target as u64 => p,
+            _ => return Ok(0),
         };
 
         let header = build_event_header(EventType::FileDelete);
 
-        if filter_events(FilterOwner::File, &header) {
-            events.discard(0);
+        if filter_events(FilterOwner::File, &header, Some(&pending.path), None) {
             return Ok(0);
         }
 
-        let dentry: *const dentry = ctx.arg(2);
-        let inode = (*dentry).d_inode;
+        let mut events = match EVENTS.reserve::<RawFileDeleteEvent>(0) {
+            Some(e) => e,
+            None => return Ok(0),
+        };
 
-        let output = capture_inode(inode);
-        if !output.0 {
-            events.discard(0);
-            return Ok(0);
-        }
+        let event = events.as_mut_ptr().cast::<RawFileDeleteEvent>();
 
-        let name = (*dentry).__bindgen_anon_1.d_name.name;
+        core::ptr::addr_of_mut!((*event).header).write(header);
 
-        let mut file_name = [0u8; 256];
-        bpf_probe_read_kernel_str(
-            file_name.as_mut_ptr() as *mut _,
-            file_name.len() as u32,
-            name as *const _,
+        core::ptr::copy_nonoverlapping(
+            pending.path.as_ptr(),
+            core::ptr::addr_of_mut!((*event).file_path).cast::<u8>(),
+            256,
         );
 
-        events.write(RawFileDeleteEvent {
-            header,
-            file_name,
-            file_mode: output.1,
-            retval: ctx.arg(4),
-        });
+        core::ptr::addr_of_mut!((*event).file_mode).write(pending.file_mode);
+
+        core::ptr::addr_of_mut!((*event).retval).write(retval);
 
         events.submit(0);
-    }
 
-    Ok(0)
+        Ok(0)
+    }
 }
 
 #[fexit]
@@ -1027,10 +1207,6 @@ fn try_vfs_rename(ctx: FEntryContext) -> Result<i32, i32> {
     unsafe {
         let header = build_event_header(EventType::FileRename);
 
-        if filter_events(FilterOwner::File, &header) {
-            return Ok(0);
-        }
-
         let renamedata: *const renamedata = ctx.arg(0);
         let old_dentry = (*renamedata).old_dentry;
         let new_dentry = (*renamedata).new_dentry;
@@ -1065,6 +1241,15 @@ fn try_vfs_rename(ctx: FEntryContext) -> Result<i32, i32> {
             event.new_filename.len() as u32,
             new_filename as *const _,
         );
+
+        if filter_events(
+            FilterOwner::File,
+            &header,
+            Some(&event.old_filename),
+            Some(&event.new_filename),
+        ) {
+            return Ok(0);
+        }
 
         let mut events = match EVENTS.reserve::<RawFileRenameEvent>(0) {
             Some(s) => s,
@@ -1148,45 +1333,63 @@ fn try_inet_listen(ctx: FExitContext) -> Result<i32, i32> {
     Ok(0)
 }
 
-fn filter_events(filter_owner: FilterOwner, header: &RawEventHeader) -> bool {
+/// Returns true when an event must be discarded.
+/// `path` and `secondary_path` are NUL-padded kernel byte buffers.
+/// For rename events, either the old or the new name can match.
+#[inline(always)]
+fn filter_events(
+    filter_owner: FilterOwner,
+    header: &RawEventHeader,
+    path: Option<&[u8; 256]>,
+    secondary_path: Option<&[u8; 256]>,
+) -> bool {
     unsafe {
-        if let Some(key) = FILTER.get(&(filter_owner as u32)) {
-            match *key {
-                FilterKey::None => {
-                    return false;
+        let filter_owner = filter_owner as u32;
+        let key = match FILTER.get(&filter_owner) {
+            Some(key) => key,
+            None => return false,
+        };
+
+        match key {
+            FilterKey::None => false,
+            FilterKey::Path(expected) => {
+                if filter_owner != (FilterOwner::File as u32) {
+                    return true;
                 }
-                FilterKey::Pid(pid) => {
-                    if header.pid != pid {
-                        return true;
-                    }
-                }
-                FilterKey::Tid(tid) => {
-                    if header.tid != tid {
-                        return true;
-                    }
-                }
-                FilterKey::Uid(uid) => {
-                    if header.uid != uid {
-                        return true;
-                    }
-                }
-                FilterKey::Ppid(ppid) => {
-                    if header.ppid != ppid {
-                        return true;
-                    }
-                }
-                FilterKey::Gid(gid) => {
-                    if header.gid != gid {
-                        return true;
-                    }
-                }
-                _ => {
-                    return false;
-                }
+
+                let first_matches = match path {
+                    Some(actual) => path_matches(expected, actual),
+                    None => false,
+                };
+                let second_matches = match secondary_path {
+                    Some(actual) => path_matches(expected, actual),
+                    None => false,
+                };
+                !(first_matches || second_matches)
             }
+            FilterKey::Pid(pid) => header.pid != *pid,
+            FilterKey::Tid(tid) => header.tid != *tid,
+            FilterKey::Ppid(ppid) => header.ppid != *ppid,
+            FilterKey::Uid(uid) => header.uid != *uid,
+            FilterKey::Gid(gid) => header.gid != *gid,
+            _ => false,
         }
-        false
     }
+}
+
+/// Exact comparison of two fixed-size NUL-padded path buffers.
+/// Avoids a 256-byte stack copy of the map value.
+#[inline(always)]
+fn path_matches(expected: &[u8; 256], actual: &[u8; 256]) -> bool {
+    for i in 0..256 {
+        if expected[i] != actual[i] {
+            return false;
+        }
+        if expected[i] == 0 {
+            return true;
+        }
+    }
+    true
 }
 
 #[fexit]
@@ -1206,7 +1409,7 @@ fn try_vm_mmap_pgoff(ctx: FExitContext) -> Result<i32, i32> {
 
         let header = build_event_header(EventType::MemoryMap);
 
-        if filter_events(FilterOwner::Memory, &header) {
+        if filter_events(FilterOwner::Memory, &header, None, None) {
             events.discard(0);
             return Ok(0);
         }

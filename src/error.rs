@@ -41,6 +41,9 @@ pub enum Error {
 
     #[error("Malformed Event")]
     MalformedEvent,
+
+    #[error("Already Subscribed")]
+    AlreadySubscribed,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

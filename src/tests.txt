@@ -1,0 +1,38 @@
+Kernel version:
+Linux vvc-virtualbox 6.8.0-136-generic #136-Ubuntu SMP PREEMPT_DYNAMIC Wed Jul  1 21:53:05 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+6.8.0-136-generic
+
+running 4 tests
+test test::bpfx_probe_checks::process_probes_attach ... ok
+test test::bpfx_probe_checks::memory_probes_attach ... ok
+test test::bpfx_probe_checks::file_probes_attach ... FAILED
+test test::bpfx_probe_checks::network_probes_attach ... FAILED
+
+failures:
+
+---- test::bpfx_probe_checks::file_probes_attach stdout ----
+
+thread 'test::bpfx_probe_checks::file_probes_attach' (5614) panicked at src/test.rs:175:13:
+5 file probe(s) failed:
+
+FILE LSM: failed to attach eBPF program
+FILE OPEN -> vfs_open: failed to attach eBPF program
+FILE CLOSE -> filp_close: failed to attach eBPF program
+FILE READ -> vfs_read: failed to attach eBPF program
+FILE WRITE -> vfs_write: failed to attach eBPF program
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test::bpfx_probe_checks::network_probes_attach stdout ----
+
+thread 'test::bpfx_probe_checks::network_probes_attach' (5616) panicked at src/test.rs:53:13:
+2 network probe(s) failed:
+
+UDP CONNECT -> udp_connect: failed to attach eBPF program
+UDP CONNECT -> udpv6_connect: failed to attach eBPF program
+
+
+failures:
+    test::bpfx_probe_checks::file_probes_attach
+    test::bpfx_probe_checks::network_probes_attach
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.94s

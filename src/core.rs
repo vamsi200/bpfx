@@ -973,12 +973,15 @@ pub(crate) fn attach_file_probe(
     }
 
     if filter.event_type.contains(&FileMask::DELETE) {
+        println!("Loading path_unlink LSM");
+        attach_lsm(bpf, btf, "path_unlink")?;
+
+        println!("Loading vfs_unlink fexit");
         attach_fexit(bpf, btf, "vfs_unlink", "vfs_unlink")?;
     }
 
     if filter.event_type.contains(&FileMask::RENAME) {
         attach_fentry(bpf, btf, "vfs_rename", "vfs_rename")?;
-
         attach_fexit(bpf, btf, "vfs_rename_retval", "vfs_rename")?;
     }
 
@@ -992,6 +995,18 @@ pub(crate) fn attach_lsm_probe(bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
 
     program.load("file_open", &btf)?;
 
+    program.attach()?;
+
+    Ok(())
+}
+
+fn attach_lsm(bpf: &mut Ebpf, btf: &Btf, name: &str) -> crate::error::Result<()> {
+    let program: &mut Lsm = bpf
+        .program_mut(name)
+        .expect("LSM program not found")
+        .try_into()?;
+
+    program.load(name, btf)?;
     program.attach()?;
 
     Ok(())
@@ -1138,17 +1153,17 @@ fn convert_file_events(
             let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileDeleteEvent) };
 
             let path_len = event
-                .file_name
+                .file_path
                 .iter()
                 .position(|&x| x == 0)
-                .unwrap_or(event.file_name.len());
+                .unwrap_or(event.file_path.len());
 
             match producer.try_send(file_event!(
                 delete,
                 Delete,
                 FileDeleteEvent,
                 convert_header(event.header),
-                String::from_utf8_lossy(&event.file_name[..path_len]).into_owned(),
+                String::from_utf8_lossy(&event.file_path[..path_len]).into_owned(),
                 FileType::from(event.file_mode),
                 event.retval
             )) {

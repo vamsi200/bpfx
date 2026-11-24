@@ -1,7 +1,7 @@
 use crate::error::Result;
 use crate::file::{
-    FileCloseEvent, FileDeleteEvent, FileEvent, FileFilter, FileOpenEvent, FileReadEvent,
-    FileRegister, FileRenameEvent, FileType, FileWriteEvent,
+    FileCloseEvent, FileCreateEvent, FileDeleteEvent, FileEvent, FileFilter, FileOpenEvent,
+    FileReadEvent, FileRegister, FileRenameEvent, FileType, FileWriteEvent, MkdirEvent, RmdirEvent,
 };
 use crate::memory::MemRegister;
 use crate::memory::MemoryUnmapEvent;
@@ -282,7 +282,14 @@ impl Bpfx {
 
             let result = self.event_loop().await;
 
-            log::info!("Bpfx event_loop() returned");
+            match &result {
+                Ok(()) => {
+                    log::info!("Bpfx runtime stopped normally");
+                }
+                Err(e) => {
+                    log::error!("Bpfx runtime failed: {e:?}");
+                }
+            }
 
             result
         })
@@ -426,6 +433,16 @@ macro_rules! file_event {
             inode: $inode,
             retval: $retval,
             flags: $flags,
+        })
+    };
+
+    (no_flags, $variant: ident, $ty: ident, $header: expr, $file_path: expr, $inode: expr, $mode: expr, $retval: expr) => {
+        FileEvent::$variant($ty {
+            header: $header,
+            file_path: $file_path,
+            inode: $inode,
+            mode: $mode,
+            retval: $retval,
         })
     };
 
@@ -956,6 +973,21 @@ pub(crate) fn attach_file_probe(
 
     attach_fexit(bpf, btf, "__fput", "__fput")?;
 
+    if filter.event_type.contains(&FileMask::MKDIR) {
+        attach_lsm(bpf, btf, "path_mkdir")?;
+        attach_fexit(bpf, btf, "vfs_mkdir", "vfs_mkdir")?;
+    }
+
+    if filter.event_type.contains(&FileMask::RMDIR) {
+        attach_lsm(bpf, btf, "path_rmdir")?;
+        attach_fexit(bpf, btf, "vfs_rmdir", "vfs_rmdir")?;
+        attach_fexit(bpf, btf, "security_path_rmdir_exit", "security_path_rmdir")?;
+    }
+
+    if filter.event_type.contains(&FileMask::CREATE) {
+        attach_fexit(bpf, btf, "do_filp_open", "do_filp_open")?;
+    }
+
     if filter.event_type.contains(&FileMask::OPEN) {
         attach_fexit(bpf, btf, "vfs_open", "vfs_open")?;
     }
@@ -973,10 +1005,7 @@ pub(crate) fn attach_file_probe(
     }
 
     if filter.event_type.contains(&FileMask::DELETE) {
-        println!("Loading path_unlink LSM");
         attach_lsm(bpf, btf, "path_unlink")?;
-
-        println!("Loading vfs_unlink fexit");
         attach_fexit(bpf, btf, "vfs_unlink", "vfs_unlink")?;
     }
 
@@ -1003,7 +1032,7 @@ pub(crate) fn attach_lsm_probe(bpf: &mut Ebpf, btf: &Btf) -> Result<()> {
 fn attach_lsm(bpf: &mut Ebpf, btf: &Btf, name: &str) -> crate::error::Result<()> {
     let program: &mut Lsm = bpf
         .program_mut(name)
-        .expect("LSM program not found")
+        .expect(&format!("LSM program not found: {name}"))
         .try_into()?;
 
     program.load(name, btf)?;
@@ -1025,6 +1054,94 @@ fn convert_file_events(
     let header = unsafe { std::ptr::read_unaligned(ptr as *const RawEventHeader) };
 
     match header.event_type {
+        EventType::Mkdir => {
+            check_size::<RawMkdirEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawMkdirEvent) };
+
+            let path_len = event
+                .file_path
+                .iter()
+                .position(|&x| x == 0)
+                .unwrap_or(event.file_path.len());
+
+            match producer.try_send(file_event!(
+                no_flags,
+                Mkdir,
+                MkdirEvent,
+                convert_header(event.header),
+                String::from_utf8_lossy(&event.file_path[..path_len]).into_owned(),
+                event.inode,
+                event.mode,
+                event.retval as i32
+            )) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
+                }
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
+                }
+            }
+        }
+        EventType::Rmdir => {
+            check_size::<RawRmdirEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawRmdirEvent) };
+
+            let path_len = event
+                .file_path
+                .iter()
+                .position(|&x| x == 0)
+                .unwrap_or(event.file_path.len());
+
+            match producer.try_send(file_event!(
+                no_flags,
+                Rmdir,
+                RmdirEvent,
+                convert_header(event.header),
+                String::from_utf8_lossy(&event.file_path[..path_len]).into_owned(),
+                event.inode,
+                event.mode,
+                event.retval as i32
+            )) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
+                }
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
+                }
+            }
+        }
+        EventType::FileCreate => {
+            check_size::<RawFileCreateEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileCreateEvent) };
+
+            let path_len = event
+                .file_path
+                .iter()
+                .position(|&x| x == 0)
+                .unwrap_or(event.file_path.len());
+
+            match producer.try_send(file_event!(
+                rest,
+                Create,
+                FileCreateEvent,
+                convert_header(event.header),
+                String::from_utf8_lossy(&event.file_path[..path_len]).into_owned(),
+                FileType::from(event.file_mode),
+                event.inode,
+                event.retval,
+                event.flags
+            )) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
+                }
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
+                }
+            }
+        }
         EventType::FileOpen => {
             check_size::<RawFileOpenEvent>(events.len())?;
             let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileOpenEvent) };

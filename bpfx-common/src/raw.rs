@@ -41,18 +41,20 @@ pub enum EventType {
     ProcessStart = 4,
     ProcessFork = 5,
     ProcessExit = 6,
-    FileOpen = 7,
-    FileRead = 8,
-    FileClose = 9,
-    FileWrite = 10,
-    FileDelete = 11,
-    FileRename = 12,
-    Bind = 13,
-    Listen = 14,
-    MemoryMap = 15,
-    MemoryUnMap = 16,
-    PendingFileRename = 17,
-    Test,
+    FileCreate = 7,
+    FileOpen = 8,
+    FileRead = 9,
+    FileClose = 10,
+    FileWrite = 11,
+    FileDelete = 12,
+    FileRename = 13,
+    Mkdir = 14,
+    Rmdir = 15,
+    Bind = 16,
+    Listen = 17,
+    MemoryMap = 18,
+    MemoryUnMap = 19,
+    PendingFileRename = 20,
 }
 
 impl TryFrom<u8> for EventType {
@@ -145,6 +147,37 @@ pub struct RawProcessExitEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct RawFilePath {
     pub filepath: [u8; 256],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawFileCreateEvent {
+    pub header: RawEventHeader,
+    pub file_path: [u8; 256],
+    pub file_mode: FileModeFilter,
+    pub inode: u64,
+    pub retval: isize,
+    pub flags: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawMkdirEvent {
+    pub header: RawEventHeader,
+    pub file_path: [u8; 256],
+    pub inode: u64,
+    pub mode: u16,
+    pub retval: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawRmdirEvent {
+    pub header: RawEventHeader,
+    pub file_path: [u8; 256],
+    pub inode: u64,
+    pub mode: u16,
+    pub retval: i32,
 }
 
 #[repr(C)]

@@ -4,16 +4,19 @@
 
 pub mod bindings;
 
-use crate::bindings::{dentry, file, in6_addr, inode, renamedata};
+use crate::bindings::{
+    dentry, file, fop_flags_t, in6_addr, inode, kernfs_open_file, mount, path, renamedata,
+};
 use crate::bindings::{sock, socket, task_struct};
 use aya_ebpf::helpers::r#gen::{
     bpf_d_path, bpf_get_current_task_btf, bpf_ktime_get_ns, bpf_probe_read_kernel_str,
 };
 use aya_ebpf::helpers::{
     bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_probe_read_kernel,
+    bpf_probe_read_kernel_buf,
 };
 use aya_ebpf::macros::tracepoint;
-use aya_ebpf::maps::{HashMap, PerCpuArray, RingBuf};
+use aya_ebpf::maps::{HashMap, LruHashMap, PerCpuArray, RingBuf};
 use aya_ebpf::programs::{FEntryContext, LsmContext, TracePointContext};
 use aya_ebpf::programs::{FExitContext, RetProbeContext};
 use aya_ebpf::{EbpfContext, TASK_COMM_LEN};
@@ -64,6 +67,24 @@ use aya_ebpf::helpers::r#gen::bpf_snprintf;
 
 #[map]
 static UNLINK_PARENT_TEMP: PerCpuArray<[u8; 256]> = PerCpuArray::with_max_entries(1, 0);
+
+#[map]
+static MKDIR_PATH_MAP: LruHashMap<u64, RawFilePath> = LruHashMap::with_max_entries(4096, 0);
+
+#[map]
+static PATH_TEMP: PerCpuArray<[u8; 512]> = PerCpuArray::with_max_entries(1, 0);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawRmdirContext {
+    pub file_path: [u8; 256],
+    pub inode: u64,
+    pub mode: u16,
+    pub _padding: [u8; 6],
+}
+
+#[map]
+static RMDIR_PATH_MAP: LruHashMap<u64, RawRmdirContext> = LruHashMap::with_max_entries(4096, 0);
 
 static UNLINK_PATH_FMT: [u8; 6] = *b"%s/%s\0";
 static UNLINK_ROOT_FMT: [u8; 5] = *b"%s%s\0";
@@ -588,6 +609,348 @@ fn try_file_open(ctx: LsmContext) -> Result<i32, i32> {
     }
 
     Ok(0)
+}
+
+const FMODE_CREATED: u32 = 0x100000;
+const MAX_ERRNO: u64 = 4095;
+
+#[fexit]
+fn do_filp_open(ctx: FExitContext) -> i32 {
+    match try_do_filp_open(ctx) {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_do_filp_open(ctx: FExitContext) -> Result<i32, i32> {
+    unsafe {
+        let mut events = match EVENTS.reserve::<RawFileCreateEvent>(0) {
+            Some(e) => e,
+            None => return Ok(0),
+        };
+
+        let file: *const file = ctx.arg(3);
+        let key = file as u64;
+
+        if file.is_null() || key >= u64::MAX - MAX_ERRNO + 1 {
+            events.discard(0);
+            return Ok(0);
+        }
+
+        if (*file).f_mode & FMODE_CREATED == 0 {
+            events.discard(0);
+            return Ok(0);
+        }
+
+        let output = capture_file(file);
+
+        if !output.0 {
+            events.discard(0);
+            return Ok(0);
+        }
+
+        let header = build_event_header(EventType::FileCreate);
+
+        let file_path = match FILE_PATH_MAP.get(&key) {
+            Some(val) => val.filepath,
+            None => {
+                events.discard(0);
+                return Ok(0);
+            }
+        };
+
+        if filter_events(FilterOwner::File, &header, Some(&file_path), None) {
+            events.discard(0);
+            return Ok(0);
+        }
+
+        events.write(RawFileCreateEvent {
+            header,
+            file_path,
+            file_mode: output.1,
+            inode: (*(*file).f_inode).i_ino,
+            retval: 0,
+            flags: (*file).f_flags,
+        });
+
+        events.submit(0);
+    }
+
+    Ok(0)
+}
+
+#[inline(always)]
+fn resolve_path(
+    parent: *const path,
+    target: *const dentry,
+    buf: &mut [u8; 256],
+) -> Result<usize, i32> {
+    unsafe {
+        if parent.is_null() || target.is_null() {
+            return Err(-22);
+        }
+
+        // PATH_TEMP is 512 bytes.
+        let path_temp = match PATH_TEMP.get_ptr_mut(0) {
+            Some(p) => &mut *p,
+            None => return Err(-12),
+        };
+        let ptr = path_temp.as_mut_ptr();
+
+        // Constant-size zeroing: everything past the path stays 0.
+        *path_temp = [0u8; 512];
+
+        let name = bpf_probe_read_kernel(core::ptr::addr_of!((*target).__bindgen_anon_1.d_name))
+            .map_err(|_| -14)?;
+        let nlen_raw = name.__bindgen_anon_1.__bindgen_anon_1.len;
+        if nlen_raw == 0 || nlen_raw > 253 {
+            return Err(-36);
+        }
+        let nlen = (nlen_raw & 0xff) as u32;
+
+        // Parent path, right-aligned in path_temp[256-n .. 256), NUL at path_temp[255].
+        let n = bpf_d_path(parent as *mut _, ptr as *mut _, 256);
+        if n < 2 || n > 256 {
+            return Err(-36);
+        }
+        let n = (n as u32) & 0x1ff;
+        let start = 256 - n; // 0..=254
+
+        let len: u32;
+        if n == 2 {
+            // Parent is "/" - reuse the NUL slot.
+            let dst = core::slice::from_raw_parts_mut(ptr.add(255), nlen as usize);
+            bpf_probe_read_kernel_buf(name.name, dst).map_err(|_| -14)?;
+            len = 1 + nlen;
+        } else {
+            *ptr.add(255) = b'/';
+            let dst = core::slice::from_raw_parts_mut(ptr.add(256), nlen as usize);
+            bpf_probe_read_kernel_buf(name.name, dst).map_err(|_| -14)?;
+            len = n + nlen;
+        }
+
+        // Keep at least one trailing NUL inside the 256-byte window.
+        if len > 255 {
+            return Err(-36);
+        }
+
+        // Constant 256-byte copy: source extent is start (<= 254) + 256 = 510 < 512,
+        bpf_probe_read_kernel_buf(ptr.add((start & 0xff) as usize).cast_const(), buf)
+            .map_err(|_| -14)?;
+
+        Ok(len as usize)
+    }
+}
+
+#[lsm(hook = "path_mkdir", sleepable)]
+pub fn path_mkdir(ctx: LsmContext) -> i32 {
+    let _ = try_path_mkdir(&ctx);
+    0
+}
+
+fn try_path_mkdir(ctx: &LsmContext) -> Result<i32, i32> {
+    unsafe {
+        let key = bpf_get_current_pid_tgid();
+
+        let _ = MKDIR_PATH_MAP.remove(&key);
+
+        let parent: *const path = ctx.arg(0);
+        let target: *const dentry = ctx.arg(1);
+
+        let path_buf = match PATH_BUF.get_ptr_mut(0) {
+            Some(ptr) => &mut *ptr,
+            None => return Ok(0),
+        };
+
+        if resolve_path(parent, target, path_buf).is_err() {
+            return Ok(0);
+        }
+
+        let value = RawFilePath {
+            filepath: *path_buf,
+        };
+
+        let _ = MKDIR_PATH_MAP.insert(&key, &value, 0);
+    }
+
+    Ok(0)
+}
+
+#[fexit]
+fn vfs_mkdir(ctx: FExitContext) -> i32 {
+    match try_vfs_mkdir(ctx) {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_vfs_mkdir(ctx: FExitContext) -> Result<i32, i32> {
+    unsafe {
+        let key = bpf_get_current_pid_tgid();
+
+        let file_path = match MKDIR_PATH_MAP.get(&key) {
+            Some(value) => value.filepath,
+            None => return Ok(0),
+        };
+
+        let _ = MKDIR_PATH_MAP.remove(&key);
+
+        let result: *const dentry = ctx.arg(4);
+
+        if result.is_null() {
+            return Ok(0);
+        }
+
+        let (inode, mode, retval) = if result as u64 >= u64::MAX - 4094 {
+            let retval = result as i64 as i32;
+            let mode: u16 = ctx.arg(3);
+
+            (0u64, mode, retval)
+        } else {
+            let inode = (*result).d_inode;
+
+            if inode.is_null() {
+                return Ok(0);
+            }
+
+            ((*inode).i_ino, (*inode).i_mode, 0i32)
+        };
+
+        let header = build_event_header(EventType::Mkdir);
+
+        if filter_events(FilterOwner::File, &header, Some(&file_path), None) {
+            return Ok(0);
+        }
+
+        let mut events = match EVENTS.reserve::<RawMkdirEvent>(0) {
+            Some(e) => e,
+            None => return Ok(0),
+        };
+
+        events.write(RawMkdirEvent {
+            header,
+            file_path,
+            inode,
+            mode,
+            retval,
+        });
+
+        events.submit(0);
+    }
+
+    Ok(0)
+}
+
+#[lsm(hook = "path_rmdir", sleepable)]
+pub fn path_rmdir(ctx: LsmContext) -> i32 {
+    let _ = try_path_rmdir(&ctx);
+    0
+}
+
+fn try_path_rmdir(ctx: &LsmContext) -> Result<i32, i32> {
+    unsafe {
+        let key = bpf_get_current_pid_tgid();
+
+        let _ = RMDIR_PATH_MAP.remove(&key);
+
+        let parent: *const path = ctx.arg(0);
+        let target: *const dentry = ctx.arg(1);
+
+        if parent.is_null() || target.is_null() {
+            return Ok(0);
+        }
+
+        let inode =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*target).d_inode)).map_err(|_| -14)?;
+
+        if inode.is_null() {
+            return Ok(0);
+        }
+
+        let ino = bpf_probe_read_kernel(core::ptr::addr_of!((*inode).i_ino)).map_err(|_| -14)?;
+
+        let mode = bpf_probe_read_kernel(core::ptr::addr_of!((*inode).i_mode)).map_err(|_| -14)?;
+
+        let path_buf = match PATH_BUF.get_ptr_mut(0) {
+            Some(ptr) => &mut *ptr,
+            None => return Ok(0),
+        };
+
+        if resolve_path(parent, target, path_buf).is_err() {
+            return Ok(0);
+        }
+
+        let value = RawRmdirContext {
+            file_path: *path_buf,
+            inode: ino,
+            mode,
+            _padding: [0; 6],
+        };
+
+        let _ = RMDIR_PATH_MAP.insert(&key, &value, 0);
+    }
+
+    Ok(0)
+}
+
+#[fexit]
+fn vfs_rmdir(ctx: FExitContext) -> i32 {
+    match try_vfs_rmdir(ctx) {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_vfs_rmdir(ctx: FExitContext) -> Result<i32, i32> {
+    unsafe {
+        let key = bpf_get_current_pid_tgid();
+
+        let value = match RMDIR_PATH_MAP.get(&key) {
+            Some(value) => *value,
+            None => return Ok(0),
+        };
+
+        let _ = RMDIR_PATH_MAP.remove(&key);
+
+        let retval: i32 = ctx.arg(3);
+
+        let header = build_event_header(EventType::Rmdir);
+
+        if filter_events(FilterOwner::File, &header, Some(&value.file_path), None) {
+            return Ok(0);
+        }
+
+        let mut events = match EVENTS.reserve::<RawRmdirEvent>(0) {
+            Some(e) => e,
+            None => return Ok(0),
+        };
+
+        events.write(RawRmdirEvent {
+            header,
+            file_path: value.file_path,
+            inode: value.inode,
+            mode: value.mode,
+            retval,
+        });
+
+        events.submit(0);
+    }
+
+    Ok(0)
+}
+
+#[fexit]
+fn security_path_rmdir_exit(ctx: FExitContext) -> i32 {
+    unsafe {
+        let retval: i32 = ctx.arg(2);
+
+        if retval != 0 {
+            let key = bpf_get_current_pid_tgid();
+            let _ = RMDIR_PATH_MAP.remove(&key);
+        }
+
+        0
+    }
 }
 
 #[fexit]

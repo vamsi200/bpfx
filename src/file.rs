@@ -239,6 +239,31 @@ impl From<FileType> for u32 {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FileCreateEvent {
+    pub header: EventHeader,
+    pub file_path: String,
+    pub file_type: FileType,
+    pub inode: u64,
+    pub retval: isize,
+    pub flags: u32,
+}
+
+impl Display for FileCreateEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} CREATE {} -> {}",
+            self.header, self.file_path, self.retval,
+        )
+    }
+}
+
 /// Emitted when the kernel completes opening a file.
 /// Generated from the `vfs_open` fexit hook.
 /// This event is emitted immediately after the kernel finishes processing
@@ -486,12 +511,15 @@ impl Display for FileRenameEvent {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 pub enum FileEvent {
+    Create(FileCreateEvent),
     Open(FileOpenEvent),
     Read(FileReadEvent),
     Close(FileCloseEvent),
     Write(FileWriteEvent),
     Delete(FileDeleteEvent),
     Rename(FileRenameEvent),
+    Mkdir(MkdirEvent),
+    Rmdir(RmdirEvent),
 }
 
 /// Identifies a file event for deduplication.
@@ -516,6 +544,8 @@ pub enum FileEvent {
 /// [`HashSet`]: std::collections::HashSet
 #[derive(Hash, Eq, PartialEq, PartialOrd, Ord)]
 pub enum FileEventKey {
+    Create { inode: u64, retval: isize },
+
     Read { inode: u64, retval: isize },
 
     Write { inode: u64, retval: isize },
@@ -527,6 +557,10 @@ pub enum FileEventKey {
     Rename { retval: i32 },
 
     Delete { retval: i32 },
+
+    Mkdir { inode: u64, retval: i32 },
+
+    Rmdir { inode: u64, retval: i32 },
 }
 
 impl FileEvent {
@@ -536,6 +570,10 @@ impl FileEvent {
     /// event is equivalent to another event for deduplication purposes.
     pub fn dedup_key(&self) -> FileEventKey {
         match self {
+            FileEvent::Create(e) => FileEventKey::Create {
+                inode: e.inode,
+                retval: e.retval,
+            },
             FileEvent::Read(e) => FileEventKey::Read {
                 inode: e.inode,
                 retval: e.retval,
@@ -559,6 +597,16 @@ impl FileEvent {
             FileEvent::Rename(e) => FileEventKey::Rename { retval: e.retval },
 
             FileEvent::Delete(e) => FileEventKey::Delete { retval: e.retval },
+
+            FileEvent::Mkdir(e) => FileEventKey::Mkdir {
+                inode: e.inode,
+                retval: e.retval,
+            },
+
+            FileEvent::Rmdir(e) => FileEventKey::Rmdir {
+                inode: e.inode,
+                retval: e.retval,
+            },
         }
     }
 
@@ -568,12 +616,15 @@ impl FileEvent {
     /// file-event filters.
     pub fn event_type(&self) -> FileMask {
         match self {
+            FileEvent::Create(_) => FileMask::CREATE,
             FileEvent::Open(_) => FileMask::OPEN,
             FileEvent::Close(_) => FileMask::CLOSE,
             FileEvent::Read(_) => FileMask::READ,
             FileEvent::Write(_) => FileMask::WRITE,
             FileEvent::Rename(_) => FileMask::RENAME,
             FileEvent::Delete(_) => FileMask::DELETE,
+            FileEvent::Mkdir(_) => FileMask::MKDIR,
+            FileEvent::Rmdir(_) => FileMask::RMDIR,
         }
     }
 
@@ -583,12 +634,15 @@ impl FileEvent {
     /// process identifier, timestamp, and kernel-thread information.
     pub fn header(&self) -> &EventHeader {
         match self {
+            Self::Create(e) => &e.header,
             Self::Open(e) => &e.header,
             Self::Read(e) => &e.header,
             Self::Close(e) => &e.header,
             Self::Write(e) => &e.header,
             Self::Delete(e) => &e.header,
             Self::Rename(e) => &e.header,
+            Self::Mkdir(e) => &e.header,
+            Self::Rmdir(e) => &e.header,
         }
     }
 
@@ -610,12 +664,16 @@ impl FileEvent {
     /// Returns the type of filesystem object associated with this event.
     pub fn file_type(&self) -> &FileType {
         match self {
+            Self::Create(e) => &e.file_type,
             Self::Open(e) => &e.file_type,
             Self::Read(e) => &e.file_type,
             Self::Close(e) => &e.file_type,
             Self::Write(e) => &e.file_type,
             Self::Delete(e) => &e.file_type,
             Self::Rename(e) => &e.file_type,
+            _ => {
+                panic!("No file type for selected type")
+            }
         }
     }
 
@@ -674,12 +732,15 @@ impl FileEvent {
     /// negative values indicate failure.
     pub fn retval(&self) -> isize {
         match self {
+            Self::Create(e) => e.retval as isize,
             Self::Open(e) => e.retval as isize,
             Self::Read(e) => e.retval,
             Self::Close(e) => e.retval as isize,
             Self::Write(e) => e.retval,
             Self::Delete(e) => e.retval as isize,
             Self::Rename(e) => e.retval as isize,
+            Self::Mkdir(e) => e.retval as isize,
+            Self::Rmdir(e) => e.retval as isize,
         }
     }
 
@@ -704,12 +765,15 @@ impl FileEvent {
     /// events. Rename and delete events return `None`.
     pub fn inode(&self) -> Option<u64> {
         match self {
+            Self::Create(e) => Some(e.inode),
             Self::Open(e) => Some(e.inode),
             Self::Read(e) => Some(e.inode),
             Self::Close(e) => Some(e.inode),
             Self::Write(e) => Some(e.inode),
             Self::Delete(_) => None,
             Self::Rename(_) => None,
+            Self::Mkdir(e) => Some(e.inode),
+            Self::Rmdir(e) => Some(e.inode),
         }
     }
 }
@@ -756,23 +820,29 @@ impl Stream for PollFile {
 /// let mask = FileMask::OPEN | FileMask::WRITE | FileMask::DELETE;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct FileMask(u8);
+pub struct FileMask(u16);
 
 impl FileMask {
-    pub const OPEN: Self = Self(1 << 0);
-    pub const CLOSE: Self = Self(1 << 1);
-    pub const READ: Self = Self(1 << 2);
-    pub const WRITE: Self = Self(1 << 3);
-    pub const DELETE: Self = Self(1 << 4);
-    pub const RENAME: Self = Self(1 << 5);
+    pub const CREATE: Self = Self(1 << 0);
+    pub const OPEN: Self = Self(1 << 1);
+    pub const CLOSE: Self = Self(1 << 2);
+    pub const READ: Self = Self(1 << 3);
+    pub const WRITE: Self = Self(1 << 4);
+    pub const DELETE: Self = Self(1 << 5);
+    pub const RENAME: Self = Self(1 << 6);
+    pub const MKDIR: Self = Self(1 << 7);
+    pub const RMDIR: Self = Self(1 << 8);
 
     pub const ALL: Self = Self(
-        Self::OPEN.0
+        Self::CREATE.0
+            | Self::OPEN.0
             | Self::CLOSE.0
             | Self::READ.0
             | Self::WRITE.0
             | Self::DELETE.0
-            | Self::RENAME.0,
+            | Self::RENAME.0
+            | Self::MKDIR.0
+            | Self::RMDIR.0,
     );
 
     pub fn contains(&self, other: &Self) -> bool {
@@ -782,7 +852,9 @@ impl FileMask {
 
 impl std::fmt::Display for FileMask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if *self == FileMask::OPEN {
+        if *self == FileMask::CREATE {
+            write!(f, "CREATE")
+        } else if *self == FileMask::OPEN {
             write!(f, "OPEN")
         } else if *self == FileMask::READ {
             write!(f, "READ")
@@ -888,6 +960,15 @@ impl Subscription for FileFilter {
 }
 
 impl FileFilter {
+    /// Subscribes to file create events.
+    ///
+    /// No additional file-type or key filtering is applied.
+    pub const CREATE: Self = Self {
+        event_type: FileMask::CREATE,
+        file_mode: FileTypeFilter::ALL,
+        filter: FilterKey::None,
+    };
+
     /// Subscribes to file open events.
     ///
     /// No additional file-type or key filtering is applied.
@@ -1020,5 +1101,53 @@ impl BitOrAssign for FileTypeFilter {
 impl From<FileTypeFilter> for FileModeFilter {
     fn from(value: FileTypeFilter) -> Self {
         value.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MkdirEvent {
+    pub header: EventHeader,
+    pub file_path: String,
+    pub inode: u64,
+    pub mode: u16,
+    pub retval: i32,
+}
+
+impl Display for MkdirEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} MKDIR {} -> {}",
+            self.header, self.file_path, self.retval,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RmdirEvent {
+    pub header: EventHeader,
+    pub file_path: String,
+    pub inode: u64,
+    pub mode: u16,
+    pub retval: i32,
+}
+
+impl Display for RmdirEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} RMDIR {} -> {}",
+            self.header, self.file_path, self.retval,
+        )
     }
 }

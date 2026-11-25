@@ -86,6 +86,43 @@ pub struct RawRmdirContext {
 #[map]
 static RMDIR_PATH_MAP: LruHashMap<u64, RawRmdirContext> = LruHashMap::with_max_entries(4096, 0);
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PendingTruncate {
+    dentry: u64,
+    file: u64,
+    file_path: [u8; 256],
+}
+
+#[map]
+static TRUNCATE_PENDING: HashMap<u64, PendingTruncate> = HashMap::with_max_entries(4096, 0);
+
+#[map]
+static TRUNCATE_TEMP: PerCpuArray<PendingTruncate> = PerCpuArray::with_max_entries(1, 0);
+
+#[map]
+static FTRUNCATE_ACTIVE: HashMap<u64, u64> = HashMap::with_max_entries(4096, 0);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PendingChown {
+    path_addr: u64,
+    file_path: [u8; 256],
+}
+
+#[map]
+static CHOWN_PENDING: HashMap<u64, PendingChown> = HashMap::with_max_entries(4096, 0);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PendingChmod {
+    path_addr: u64,
+    file_path: [u8; 256],
+}
+
+#[map]
+static CHMOD_PENDING: HashMap<u64, PendingChmod> = HashMap::with_max_entries(4096, 0);
+
 static UNLINK_PATH_FMT: [u8; 6] = *b"%s/%s\0";
 static UNLINK_ROOT_FMT: [u8; 5] = *b"%s%s\0";
 
@@ -115,15 +152,16 @@ fn collect_process_ctx() -> (u64, u32, u32, u32, u32, u32, [u8; TASK_COMM_LEN]) 
         let uid = uid_gid as u32;
         let gid = (uid_gid >> 32) as u32;
         let task = bpf_get_current_task_btf() as *const task_struct;
-        let parent_ptr = match bpf_probe_read_kernel(core::ptr::addr_of!((*task).real_parent)) {
-            Ok(p) => p,
-            Err(_) => core::ptr::null(),
-        };
 
-        let ppid = if parent_ptr.is_null() {
-            0 //WARN:not a good idea
+        let ppid = if task.is_null() {
+            0
         } else {
-            bpf_probe_read_kernel(&(*parent_ptr).tgid).unwrap_or(0) as u32
+            match bpf_probe_read_kernel(core::ptr::addr_of!((*task).real_parent)) {
+                Ok(parent) if !parent.is_null() => {
+                    bpf_probe_read_kernel(core::ptr::addr_of!((*parent).tgid)).unwrap_or(0) as u32
+                }
+                _ => 0,
+            }
         };
 
         let comm = bpf_get_current_comm().unwrap_or([0u8; TASK_COMM_LEN]);
@@ -940,6 +978,25 @@ fn try_vfs_rmdir(ctx: FExitContext) -> Result<i32, i32> {
 }
 
 #[fexit]
+fn do_truncate(ctx: FExitContext) -> i32 {
+    match { try_do_truncate(ctx) } {
+        Ok(v) => v,
+        Err(_) => 0,
+    }
+}
+
+fn try_do_truncate(ctx: FExitContext) -> Result<i32, i32> {
+    unsafe {
+        let mut events = match EVENTS.reserve::<RawFileTruncateEvent>(0) {
+            Some(e) => e,
+            None => return Ok(0),
+        };
+    }
+
+    Ok(0)
+}
+
+#[fexit]
 fn security_path_rmdir_exit(ctx: FExitContext) -> i32 {
     unsafe {
         let retval: i32 = ctx.arg(2);
@@ -959,6 +1016,61 @@ fn vfs_open(ctx: FExitContext) -> i32 {
         Ok(v) => v,
         Err(_) => 0,
     }
+}
+
+#[fexit]
+fn vfs_fsync_range_exit(ctx: FExitContext) -> i32 {
+    let _ = try_vfs_fsync_range_exit(&ctx);
+    0
+}
+
+#[inline(always)]
+fn try_vfs_fsync_range_exit(ctx: &FExitContext) -> Result<(), i32> {
+    unsafe {
+        let filp: *const file = ctx.arg(0);
+        if filp.is_null() {
+            return Ok(());
+        }
+
+        let inode_ptr =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*filp).f_inode)).map_err(|_| -14)?;
+        if inode_ptr.is_null() {
+            return Ok(());
+        }
+
+        let inode =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*inode_ptr).i_ino)).map_err(|_| -14)? as u64;
+        let mode: u16 =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*inode_ptr).i_mode)).map_err(|_| -14)?;
+
+        let start: i64 = ctx.arg(1);
+        let end: i64 = ctx.arg(2);
+        let datasync: i32 = ctx.arg(3);
+        let retval: i32 = ctx.arg(4);
+        let header = build_event_header(EventType::FileSync);
+
+        if filter_events(FilterOwner::File, &header, None, None) {
+            return Ok(());
+        }
+
+        let Some(mut entry) = EVENTS.reserve::<RawFileSyncEvent>(0) else {
+            return Ok(());
+        };
+
+        entry.write(RawFileSyncEvent {
+            header,
+            file_path: [0; 256],
+            inode,
+            start,
+            end,
+            datasync,
+            retval,
+            mode,
+        });
+        entry.submit(0);
+    }
+
+    Ok(())
 }
 
 fn try_vfs_open(ctx: FExitContext) -> Result<i32, i32> {
@@ -1154,6 +1266,404 @@ fn try_sched_process_fork(ctx: TracePointContext) -> Result<i32, i32> {
     }
 
     Ok(0)
+}
+
+#[fentry]
+fn vfs_truncate_enter(ctx: FEntryContext) -> i32 {
+    let _ = try_vfs_truncate_enter(&ctx);
+    0
+}
+
+#[inline(always)]
+fn try_vfs_truncate_enter(ctx: &FEntryContext) -> Result<(), i32> {
+    unsafe {
+        let key = bpf_get_current_pid_tgid();
+        let _ = TRUNCATE_PENDING.remove(&key);
+
+        let target: *const path = ctx.arg(0);
+        if target.is_null() {
+            return Ok(());
+        }
+
+        let target_dentry =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*target).dentry)).map_err(|_| -14)?;
+        if target_dentry.is_null() {
+            return Ok(());
+        }
+
+        let temp = PATH_TEMP.get_ptr_mut(0).ok_or(-12)?;
+        let temp_ptr = (*temp).as_mut_ptr();
+
+        let len = bpf_d_path(target.cast_mut().cast(), temp_ptr.cast(), 256);
+        if len <= 0 || len > 256 {
+            return Ok(());
+        }
+
+        save_truncate_path(key, target_dentry, 0, temp_ptr, len as usize)
+    }
+}
+
+#[inline(always)]
+unsafe fn save_truncate_path(
+    key: u64,
+    target: *const dentry,
+    file_addr: u64,
+    source: *const u8,
+    len: usize,
+) -> Result<(), i32> {
+    unsafe {
+        let pending = &mut *TRUNCATE_TEMP.get_ptr_mut(0).ok_or(-12)?;
+        pending.dentry = target as u64;
+        pending.file = file_addr;
+        pending.file_path = [0; 256];
+
+        // Both callers bound len to 1..=256. Copy through the NUL and
+        // keep the remaining bytes zero for exact path filtering.
+        let dst = core::slice::from_raw_parts_mut(pending.file_path.as_mut_ptr(), len);
+        bpf_probe_read_kernel_buf(source, dst).map_err(|_| -14)?;
+
+        let _ = TRUNCATE_PENDING.insert(&key, pending, 0);
+        Ok(())
+    }
+}
+
+#[fexit]
+fn do_truncate_exit(ctx: FExitContext) -> i32 {
+    let _ = try_do_truncate_exit(&ctx);
+    0
+}
+
+#[inline(always)]
+fn try_do_truncate_exit(ctx: &FExitContext) -> Result<(), i32> {
+    unsafe {
+        let target: *const dentry = ctx.arg(1);
+        if target.is_null() {
+            return Ok(());
+        }
+
+        let filp: *const file = ctx.arg(4);
+        let file_path = if filp.is_null() {
+            let key = bpf_get_current_pid_tgid();
+            let Some(pending) = TRUNCATE_PENDING.get(&key) else {
+                return Ok(());
+            };
+
+            if pending.dentry != target as u64 {
+                return Ok(());
+            }
+
+            let file_path = pending.file_path;
+            let _ = TRUNCATE_PENDING.remove(&key);
+            file_path
+        } else {
+            [0u8; 256]
+        };
+
+        let inode_ptr =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*target).d_inode)).map_err(|_| -14)?;
+        if inode_ptr.is_null() {
+            return Ok(());
+        }
+
+        let inode =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*inode_ptr).i_ino)).map_err(|_| -14)? as u64;
+        let mode: u16 =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*inode_ptr).i_mode)).map_err(|_| -14)?;
+        let requested_size: i64 = ctx.arg(2);
+        let retval: i32 = ctx.arg(5);
+        let header = build_event_header(EventType::Truncate);
+
+        let filter_path = if filp.is_null() {
+            Some(&file_path)
+        } else {
+            None
+        };
+
+        if filter_events(FilterOwner::File, &header, filter_path, None) {
+            return Ok(());
+        }
+
+        let Some(mut entry) = EVENTS.reserve::<RawFileTruncateEvent>(0) else {
+            return Ok(());
+        };
+
+        entry.write(RawFileTruncateEvent {
+            header,
+            file_path,
+            inode,
+            mode,
+            requested_size,
+            retval,
+        });
+        entry.submit(0);
+
+        Ok(())
+    }
+}
+
+#[fexit]
+fn vfs_truncate_exit(_ctx: FExitContext) -> i32 {
+    let key = bpf_get_current_pid_tgid();
+    let _ = TRUNCATE_PENDING.remove(&key);
+    0
+}
+
+#[fexit]
+fn do_ftruncate_cleanup(ctx: FExitContext) -> i32 {
+    unsafe {
+        let key = bpf_get_current_pid_tgid();
+        let filp: *const file = ctx.arg(0);
+
+        unsafe {
+            if let Some(pending) = TRUNCATE_PENDING.get(&key) {
+                if pending.file == filp as u64 {
+                    let _ = TRUNCATE_PENDING.remove(&key);
+                }
+            }
+        }
+
+        let _ = FTRUNCATE_ACTIVE.remove(&key);
+        0
+    }
+}
+
+#[lsm(hook = "path_chown", sleepable)]
+pub fn path_chown(ctx: LsmContext) -> i32 {
+    unsafe {
+        let previous_ret: i32 = ctx.arg(3);
+
+        let key = bpf_get_current_pid_tgid();
+        let _ = CHOWN_PENDING.remove(&key);
+
+        if previous_ret == 0 {
+            let _ = try_capture_path_chown(&ctx, key);
+        }
+
+        previous_ret
+    }
+}
+
+#[inline(always)]
+fn try_capture_path_chown(ctx: &LsmContext, key: u64) -> Result<(), i32> {
+    unsafe {
+        let target: *const path = ctx.arg(0);
+        if target.is_null() {
+            return Ok(());
+        }
+
+        let temp = PATH_TEMP.get_ptr_mut(0).ok_or(-12)?;
+        let temp_ptr = (*temp).as_mut_ptr();
+
+        let len = bpf_d_path(target.cast_mut().cast(), temp_ptr.cast(), 256);
+        if len <= 0 || len > 256 {
+            return Ok(());
+        }
+
+        let path_buf = &mut *PATH_BUF.get_ptr_mut(0).ok_or(-12)?;
+        *path_buf = [0; 256];
+
+        // Copy the NUL too, keeping the remaining bytes zero for path filters.
+        let dst = core::slice::from_raw_parts_mut(path_buf.as_mut_ptr(), len as usize);
+        bpf_probe_read_kernel_buf(temp_ptr.cast_const(), dst).map_err(|_| -14)?;
+
+        let pending = PendingChown {
+            path_addr: target as u64,
+            file_path: *path_buf,
+        };
+
+        let _ = CHOWN_PENDING.insert(&key, &pending, 0);
+        Ok(())
+    }
+}
+
+#[fexit]
+fn chown_common_exit(ctx: FExitContext) -> i32 {
+    let _ = try_chown_common_exit(&ctx);
+    0
+}
+
+#[inline(always)]
+fn try_chown_common_exit(ctx: &FExitContext) -> Result<(), i32> {
+    unsafe {
+        let key = bpf_get_current_pid_tgid();
+        let target: *const path = ctx.arg(0);
+
+        let mut file_path = [0u8; 256];
+        let mut has_path = false;
+
+        if let Some(pending) = CHOWN_PENDING.get(&key) {
+            if !target.is_null() && pending.path_addr == target as u64 {
+                file_path = pending.file_path;
+                has_path = true;
+            }
+            let _ = CHOWN_PENDING.remove(&key);
+        }
+
+        if target.is_null() {
+            return Ok(());
+        }
+
+        let dentry_ptr =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*target).dentry)).map_err(|_| -14)?;
+        if dentry_ptr.is_null() {
+            return Ok(());
+        }
+
+        let inode_ptr =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*dentry_ptr).d_inode)).map_err(|_| -14)?;
+        if inode_ptr.is_null() {
+            return Ok(());
+        }
+
+        let inode =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*inode_ptr).i_ino)).map_err(|_| -14)? as u64;
+
+        let requested_uid: u32 = ctx.arg(1);
+        let requested_gid: u32 = ctx.arg(2);
+        let retval: i32 = ctx.arg(3);
+        let header = build_event_header(EventType::FileChown);
+        let filter_path = if has_path { Some(&file_path) } else { None };
+
+        if filter_events(FilterOwner::File, &header, filter_path, None) {
+            return Ok(());
+        }
+
+        let Some(mut entry) = EVENTS.reserve::<RawFileChownEvent>(0) else {
+            return Ok(());
+        };
+
+        entry.write(RawFileChownEvent {
+            header,
+            file_path,
+            inode,
+            requested_uid,
+            requested_gid,
+            retval,
+        });
+        entry.submit(0);
+    }
+
+    Ok(())
+}
+
+#[lsm(hook = "path_chmod", sleepable)]
+pub fn path_chmod(ctx: LsmContext) -> i32 {
+    unsafe {
+        let previous_ret: i32 = ctx.arg(2);
+        let key = bpf_get_current_pid_tgid();
+
+        let _ = CHMOD_PENDING.remove(&key);
+        if previous_ret == 0 {
+            let _ = try_capture_path_chmod(&ctx, key);
+        }
+
+        previous_ret
+    }
+}
+
+#[inline(always)]
+fn try_capture_path_chmod(ctx: &LsmContext, key: u64) -> Result<(), i32> {
+    unsafe {
+        let target: *const path = ctx.arg(0);
+        if target.is_null() {
+            return Ok(());
+        }
+
+        let scratch = PATH_TEMP.get_ptr_mut(0).ok_or(-12)?;
+        let scratch_ptr = (*scratch).as_mut_ptr();
+
+        let len = bpf_d_path(target.cast_mut().cast(), scratch_ptr.cast(), 256);
+        if len <= 0 || len > 256 {
+            return Ok(());
+        }
+
+        let path_buf = &mut *PATH_BUF.get_ptr_mut(0).ok_or(-12)?;
+        *path_buf = [0; 256];
+
+        // Copy through the NUL and leave the rest zeroed for exact-path filters.
+        let dst = core::slice::from_raw_parts_mut(path_buf.as_mut_ptr(), len as usize);
+        bpf_probe_read_kernel_buf(scratch_ptr.cast_const(), dst).map_err(|_| -14)?;
+
+        let pending = PendingChmod {
+            path_addr: target as u64,
+            file_path: *path_buf,
+        };
+
+        let _ = CHMOD_PENDING.insert(&key, &pending, 0);
+        Ok(())
+    }
+}
+
+#[fexit]
+fn chmod_common_exit(ctx: FExitContext) -> i32 {
+    let _ = try_chmod_common_exit(&ctx);
+    0
+}
+
+#[inline(always)]
+fn try_chmod_common_exit(ctx: &FExitContext) -> Result<(), i32> {
+    unsafe {
+        let key = bpf_get_current_pid_tgid();
+        let target: *const path = ctx.arg(0);
+
+        let mut file_path = [0u8; 256];
+        let mut has_path = false;
+
+        if let Some(pending) = CHMOD_PENDING.get(&key) {
+            if !target.is_null() && pending.path_addr == target as u64 {
+                file_path = pending.file_path;
+                has_path = true;
+            }
+            let _ = CHMOD_PENDING.remove(&key);
+        }
+
+        if target.is_null() {
+            return Ok(());
+        }
+
+        let dentry_ptr =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*target).dentry)).map_err(|_| -14)?;
+        if dentry_ptr.is_null() {
+            return Ok(());
+        }
+
+        let inode_ptr =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*dentry_ptr).d_inode)).map_err(|_| -14)?;
+        if inode_ptr.is_null() {
+            return Ok(());
+        }
+
+        let inode =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*inode_ptr).i_ino)).map_err(|_| -14)? as u64;
+        let inode_mode: u16 =
+            bpf_probe_read_kernel(core::ptr::addr_of!((*inode_ptr).i_mode)).map_err(|_| -14)?;
+
+        let mode: u16 = ctx.arg(1);
+        let requested_mode = mode & 0o7777;
+        let retval: i32 = ctx.arg(2);
+        let header = build_event_header(EventType::FileChmod);
+        let filter_path = if has_path { Some(&file_path) } else { None };
+
+        if filter_events(FilterOwner::File, &header, filter_path, None) {
+            return Ok(());
+        }
+
+        let Some(mut entry) = EVENTS.reserve::<RawFileChmodEvent>(0) else {
+            return Ok(());
+        };
+
+        entry.write(RawFileChmodEvent {
+            header,
+            file_path,
+            inode,
+            requested_mode,
+            inode_mode,
+            retval,
+        });
+        entry.submit(0);
+
+        Ok(())
+    }
 }
 
 #[fexit]

@@ -520,6 +520,10 @@ pub enum FileEvent {
     Rename(FileRenameEvent),
     Mkdir(MkdirEvent),
     Rmdir(RmdirEvent),
+    Truncate(FileTruncateEvent),
+    FileSync(FileSyncEvent),
+    FileChown(FileChownEvent),
+    FileChmod(FileChmodEvent),
 }
 
 /// Identifies a file event for deduplication.
@@ -561,6 +565,14 @@ pub enum FileEventKey {
     Mkdir { inode: u64, retval: i32 },
 
     Rmdir { inode: u64, retval: i32 },
+
+    FileTruncate { inode: u64, retval: i32 },
+
+    FileSync { inode: u64, retval: i32 },
+
+    FileChown { inode: u64, retval: i32 },
+
+    FileChmod { inode: u64, retval: i32 },
 }
 
 impl FileEvent {
@@ -607,6 +619,26 @@ impl FileEvent {
                 inode: e.inode,
                 retval: e.retval,
             },
+
+            FileEvent::Truncate(e) => FileEventKey::FileTruncate {
+                inode: e.inode,
+                retval: e.retval,
+            },
+
+            FileEvent::FileSync(e) => FileEventKey::FileSync {
+                inode: e.inode,
+                retval: e.retval,
+            },
+
+            FileEvent::FileChown(e) => FileEventKey::FileChown {
+                inode: e.inode,
+                retval: e.retval,
+            },
+
+            FileEvent::FileChmod(e) => FileEventKey::FileChmod {
+                inode: e.inode,
+                retval: e.retval,
+            },
         }
     }
 
@@ -625,6 +657,10 @@ impl FileEvent {
             FileEvent::Delete(_) => FileMask::DELETE,
             FileEvent::Mkdir(_) => FileMask::MKDIR,
             FileEvent::Rmdir(_) => FileMask::RMDIR,
+            FileEvent::Truncate(_) => FileMask::TRUNCATE,
+            FileEvent::FileSync(_) => FileMask::FILE_SYNC,
+            FileEvent::FileChown(_) => FileMask::FILE_CHOWN,
+            FileEvent::FileChmod(_) => FileMask::FILE_CHMOD,
         }
     }
 
@@ -643,6 +679,10 @@ impl FileEvent {
             Self::Rename(e) => &e.header,
             Self::Mkdir(e) => &e.header,
             Self::Rmdir(e) => &e.header,
+            Self::Truncate(e) => &e.header,
+            Self::FileSync(e) => &e.header,
+            Self::FileChown(e) => &e.header,
+            Self::FileChmod(e) => &e.header,
         }
     }
 
@@ -741,6 +781,10 @@ impl FileEvent {
             Self::Rename(e) => e.retval as isize,
             Self::Mkdir(e) => e.retval as isize,
             Self::Rmdir(e) => e.retval as isize,
+            Self::Truncate(e) => e.retval as isize,
+            Self::FileSync(e) => e.retval as isize,
+            Self::FileChown(e) => e.retval as isize,
+            Self::FileChmod(e) => e.retval as isize,
         }
     }
 
@@ -774,6 +818,10 @@ impl FileEvent {
             Self::Rename(_) => None,
             Self::Mkdir(e) => Some(e.inode),
             Self::Rmdir(e) => Some(e.inode),
+            Self::Truncate(e) => Some(e.inode),
+            Self::FileSync(e) => Some(e.inode),
+            Self::FileChown(e) => Some(e.inode),
+            Self::FileChmod(e) => Some(e.inode),
         }
     }
 }
@@ -832,6 +880,10 @@ impl FileMask {
     pub const RENAME: Self = Self(1 << 6);
     pub const MKDIR: Self = Self(1 << 7);
     pub const RMDIR: Self = Self(1 << 8);
+    pub const TRUNCATE: Self = Self(1 << 9);
+    pub const FILE_SYNC: Self = Self(1 << 10);
+    pub const FILE_CHOWN: Self = Self(1 << 11);
+    pub const FILE_CHMOD: Self = Self(1 << 12);
 
     pub const ALL: Self = Self(
         Self::CREATE.0
@@ -842,7 +894,11 @@ impl FileMask {
             | Self::DELETE.0
             | Self::RENAME.0
             | Self::MKDIR.0
-            | Self::RMDIR.0,
+            | Self::RMDIR.0
+            | Self::TRUNCATE.0
+            | Self::FILE_SYNC.0
+            | Self::FILE_CHOWN.0
+            | Self::FILE_CHMOD.0,
     );
 
     pub fn contains(&self, other: &Self) -> bool {
@@ -1148,6 +1204,127 @@ impl Display for RmdirEvent {
             f,
             "{} RMDIR {} -> {}",
             self.header, self.file_path, self.retval,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FileTruncateEvent {
+    pub header: EventHeader,
+    pub file_path: String,
+    pub inode: u64,
+    pub requested_size: i64,
+    pub mode: u16,
+    pub retval: i32,
+}
+
+impl Display for FileTruncateEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} TRUNCATE {} size={} retval={}",
+            self.header, self.file_path, self.requested_size, self.retval,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FileSyncEvent {
+    pub header: EventHeader,
+    pub file_path: Option<String>,
+    pub inode: u64,
+    pub start: i64,
+    pub end: i64,
+    pub datasync: bool,
+    pub retval: i32,
+    pub mode: u16,
+}
+
+impl Display for FileSyncEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let op = if self.datasync { "FDATASYNC" } else { "FSYNC" };
+        let path = self.file_path.as_deref().unwrap_or("<path unavailable>");
+
+        write!(
+            f,
+            "{} {} {} inode={} range={}..={} retval={}",
+            self.header, op, path, self.inode, self.start, self.end, self.retval,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FileChownEvent {
+    pub header: EventHeader,
+    pub file_path: Option<String>,
+    pub inode: u64,
+    pub requested_uid: Option<u32>,
+    pub requested_gid: Option<u32>,
+    pub retval: i32,
+}
+
+impl Display for FileChownEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let path = self.file_path.as_deref().unwrap_or("<path unavailable>");
+
+        write!(f, "{} CHOWN {} inode={}", self.header, path, self.inode)?;
+
+        match self.requested_uid {
+            Some(uid) => write!(f, " uid={uid}")?,
+            None => f.write_str(" uid=unchanged")?,
+        }
+        match self.requested_gid {
+            Some(gid) => write!(f, " gid={gid}")?,
+            None => f.write_str(" gid=unchanged")?,
+        }
+
+        write!(f, " retval={}", self.retval)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FileChmodEvent {
+    pub header: EventHeader,
+    pub file_path: Option<String>,
+    pub inode: u64,
+    pub requested_mode: u16,
+    pub inode_mode: u16,
+    pub retval: i32,
+}
+
+impl Display for FileChmodEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let path = self.file_path.as_deref().unwrap_or("<path unavailable>");
+
+        write!(
+            f,
+            "{} CHMOD {} inode={} requested={:04o} mode={:04o} retval={}",
+            self.header,
+            path,
+            self.inode,
+            self.requested_mode,
+            self.inode_mode & 0o7777,
+            self.retval,
         )
     }
 }

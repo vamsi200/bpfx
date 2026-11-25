@@ -55,6 +55,10 @@ pub enum EventType {
     MemoryMap = 18,
     MemoryUnMap = 19,
     PendingFileRename = 20,
+    Truncate = 21,
+    FileSync = 22,
+    FileChown = 23,
+    FileChmod = 24,
 }
 
 impl TryFrom<u8> for EventType {
@@ -65,9 +69,26 @@ impl TryFrom<u8> for EventType {
             2 => Ok(Self::Accept),
             3 => Ok(Self::Close),
             4 => Ok(Self::ProcessStart),
-            5 => Ok(Self::ProcessExit),
-            6 => Ok(Self::FileOpen),
-            7 => Ok(Self::FileClose),
+            5 => Ok(Self::ProcessFork),
+            6 => Ok(Self::ProcessExit),
+            7 => Ok(Self::FileCreate),
+            8 => Ok(Self::FileOpen),
+            9 => Ok(Self::FileRead),
+            10 => Ok(Self::FileClose),
+            11 => Ok(Self::FileWrite),
+            12 => Ok(Self::FileDelete),
+            13 => Ok(Self::FileRename),
+            14 => Ok(Self::Mkdir),
+            15 => Ok(Self::Rmdir),
+            16 => Ok(Self::Bind),
+            17 => Ok(Self::Listen),
+            18 => Ok(Self::MemoryMap),
+            19 => Ok(Self::MemoryUnMap),
+            20 => Ok(Self::PendingFileRename),
+            21 => Ok(Self::Truncate),
+            22 => Ok(Self::FileSync),
+            23 => Ok(Self::FileChown),
+            34 => Ok(Self::FileChmod),
             _ => Err(()),
         }
     }
@@ -147,6 +168,52 @@ pub struct RawProcessExitEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct RawFilePath {
     pub filepath: [u8; 256],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawFileChmodEvent {
+    pub header: RawEventHeader,
+    pub file_path: [u8; 256],
+    pub inode: u64,
+    pub requested_mode: u16,
+    pub inode_mode: u16,
+    pub retval: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawFileChownEvent {
+    pub header: RawEventHeader,
+    pub file_path: [u8; 256],
+    pub inode: u64,
+    pub requested_uid: u32,
+    pub requested_gid: u32,
+    pub retval: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawFileSyncEvent {
+    pub header: RawEventHeader,
+    pub file_path: [u8; 256],
+    pub inode: u64,
+    pub start: i64,
+    pub end: i64,
+    pub datasync: i32,
+    pub retval: i32,
+    pub mode: u16,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawFileTruncateEvent {
+    pub header: RawEventHeader,
+    pub file_path: [u8; 256],
+    pub inode: u64,
+    pub requested_size: i64,
+    pub mode: u16,
+    pub retval: i32,
 }
 
 #[repr(C)]

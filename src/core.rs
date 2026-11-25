@@ -1,7 +1,8 @@
 use crate::error::Result;
 use crate::file::{
-    FileCloseEvent, FileCreateEvent, FileDeleteEvent, FileEvent, FileFilter, FileOpenEvent,
-    FileReadEvent, FileRegister, FileRenameEvent, FileType, FileWriteEvent, MkdirEvent, RmdirEvent,
+    FileChmodEvent, FileChownEvent, FileCloseEvent, FileCreateEvent, FileDeleteEvent, FileEvent,
+    FileFilter, FileOpenEvent, FileReadEvent, FileRegister, FileRenameEvent, FileSyncEvent,
+    FileTruncateEvent, FileType, FileWriteEvent, MkdirEvent, RmdirEvent,
 };
 use crate::memory::MemRegister;
 use crate::memory::MemoryUnmapEvent;
@@ -441,6 +442,17 @@ macro_rules! file_event {
             header: $header,
             file_path: $file_path,
             inode: $inode,
+            mode: $mode,
+            retval: $retval,
+        })
+    };
+
+    (truncate, $variant: ident, $ty: ident, $header: expr, $file_path: expr, $inode: expr, $requested_size: expr, $mode: expr, $retval: expr) => {
+        FileEvent::$variant($ty {
+            header: $header,
+            file_path: $file_path,
+            inode: $inode,
+            requested_size: $requested_size,
             mode: $mode,
             retval: $retval,
         })
@@ -973,6 +985,26 @@ pub(crate) fn attach_file_probe(
 
     attach_fexit(bpf, btf, "__fput", "__fput")?;
 
+    if filter.event_type.contains(&FileMask::FILE_CHMOD) {
+        attach_fexit(bpf, btf, "chmod_common_exit", "chmod_common")?;
+        attach_lsm(bpf, btf, "path_chmod")?;
+    }
+
+    if filter.event_type.contains(&FileMask::FILE_CHOWN) {
+        attach_fexit(bpf, btf, "chown_common_exit", "chown_common")?;
+        attach_lsm(bpf, btf, "path_chown")?;
+    }
+
+    if filter.event_type.contains(&FileMask::FILE_SYNC) {
+        attach_fexit(bpf, btf, "vfs_fsync_range_exit", "vfs_fsync_range")?;
+    }
+
+    if filter.event_type.contains(&FileMask::TRUNCATE) {
+        attach_fexit(bpf, btf, "do_truncate_exit", "do_truncate")?;
+        attach_fexit(bpf, btf, "vfs_truncate_exit", "vfs_truncate")?;
+        attach_fentry(bpf, btf, "vfs_truncate_enter", "vfs_truncate")?;
+    }
+
     if filter.event_type.contains(&FileMask::MKDIR) {
         attach_lsm(bpf, btf, "path_mkdir")?;
         attach_fexit(bpf, btf, "vfs_mkdir", "vfs_mkdir")?;
@@ -1054,6 +1086,137 @@ fn convert_file_events(
     let header = unsafe { std::ptr::read_unaligned(ptr as *const RawEventHeader) };
 
     match header.event_type {
+        EventType::FileChmod => {
+            check_size::<RawFileChmodEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileChmodEvent) };
+
+            let file_path = if event.file_path[0] == 0 {
+                None
+            } else {
+                let path_len = event
+                    .file_path
+                    .iter()
+                    .position(|&x| x == 0)
+                    .unwrap_or(event.file_path.len());
+                Some(String::from_utf8_lossy(&event.file_path[..path_len]).into_owned())
+            };
+
+            match producer.try_send(FileEvent::FileChmod(FileChmodEvent {
+                header: convert_header(event.header),
+                file_path,
+                inode: event.inode,
+                requested_mode: event.requested_mode,
+                inode_mode: event.inode_mode,
+                retval: event.retval as i32,
+            })) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
+                }
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
+                }
+            }
+        }
+
+        EventType::FileChown => {
+            check_size::<RawFileChownEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileChownEvent) };
+
+            let file_path = if event.file_path[0] == 0 {
+                None
+            } else {
+                let path_len = event
+                    .file_path
+                    .iter()
+                    .position(|&x| x == 0)
+                    .unwrap_or(event.file_path.len());
+                Some(String::from_utf8_lossy(&event.file_path[..path_len]).into_owned())
+            };
+
+            match producer.try_send(FileEvent::FileChown(FileChownEvent {
+                header: convert_header(event.header),
+                file_path,
+                inode: event.inode,
+                requested_uid: (event.requested_uid != u32::MAX).then_some(event.requested_uid),
+                requested_gid: (event.requested_gid != u32::MAX).then_some(event.requested_gid),
+                retval: event.retval as i32,
+            })) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
+                }
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
+                }
+            }
+        }
+
+        EventType::FileSync => {
+            check_size::<RawFileSyncEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileSyncEvent) };
+
+            let file_path = if event.file_path[0] == 0 {
+                None
+            } else {
+                let path_len = event
+                    .file_path
+                    .iter()
+                    .position(|&x| x == 0)
+                    .unwrap_or(event.file_path.len());
+                Some(String::from_utf8_lossy(&event.file_path[..path_len]).into_owned())
+            };
+
+            match producer.try_send(FileEvent::FileSync(FileSyncEvent {
+                header: convert_header(event.header),
+                file_path,
+                inode: event.inode,
+                start: event.start,
+                end: event.end,
+                datasync: event.datasync != 0,
+                retval: event.retval as i32,
+                mode: event.mode,
+            })) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
+                }
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
+                }
+            }
+        }
+
+        EventType::Truncate => {
+            check_size::<RawFileTruncateEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileTruncateEvent) };
+
+            let path_len = event
+                .file_path
+                .iter()
+                .position(|&x| x == 0)
+                .unwrap_or(event.file_path.len());
+
+            match producer.try_send(file_event!(
+                truncate,
+                Truncate,
+                FileTruncateEvent,
+                convert_header(event.header),
+                String::from_utf8_lossy(&event.file_path[..path_len]).into_owned(),
+                event.inode,
+                event.requested_size,
+                event.mode,
+                event.retval as i32
+            )) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
+                }
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
+                }
+            }
+        }
         EventType::Mkdir => {
             check_size::<RawMkdirEvent>(events.len())?;
             let event = unsafe { std::ptr::read_unaligned(ptr as *const RawMkdirEvent) };

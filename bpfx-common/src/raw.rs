@@ -59,6 +59,12 @@ pub enum EventType {
     FileSync = 22,
     FileChown = 23,
     FileChmod = 24,
+    FileLink = 25,
+    FileSymLink = 26,
+    Send = 27,
+    Receive = 28,
+    TcpRetransmit = 29,
+    TcpStateChange = 30,
 }
 
 impl TryFrom<u8> for EventType {
@@ -88,7 +94,13 @@ impl TryFrom<u8> for EventType {
             21 => Ok(Self::Truncate),
             22 => Ok(Self::FileSync),
             23 => Ok(Self::FileChown),
-            34 => Ok(Self::FileChmod),
+            24 => Ok(Self::FileChmod),
+            25 => Ok(Self::FileLink),
+            26 => Ok(Self::FileSymLink),
+            27 => Ok(Self::Send),
+            28 => Ok(Self::Receive),
+            29 => Ok(Self::TcpRetransmit),
+            30 => Ok(Self::TcpStateChange),
             _ => Err(()),
         }
     }
@@ -152,6 +164,54 @@ pub struct PendingConnect {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+pub struct RawNetworkEndpoints {
+    pub src_addr: [u8; 16],
+    pub dst_addr: [u8; 16],
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub ip_version: IpVersion,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawSendEvent {
+    pub header: RawEventHeader,
+    pub protocol: RawProtocol,
+    pub endpoints: RawNetworkEndpoints,
+    pub requested_len: u64,
+    pub retval: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawReceiveEvent {
+    pub header: RawEventHeader,
+    pub protocol: RawProtocol,
+    pub endpoints: RawNetworkEndpoints,
+    pub requested_len: u64,
+    pub flags: i32,
+    pub retval: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawTcpRetransmitEvent {
+    pub header: RawEventHeader,
+    pub endpoints: RawNetworkEndpoints,
+    pub state: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawTcpStateChangeEvent {
+    pub header: RawEventHeader,
+    pub endpoints: RawNetworkEndpoints,
+    pub old_state: i32,
+    pub new_state: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct RawProcessStartEvent {
     pub header: RawEventHeader,
     pub filename: [u8; 256],
@@ -168,6 +228,25 @@ pub struct RawProcessExitEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct RawFilePath {
     pub filepath: [u8; 256],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawFileLinkEvent {
+    pub header: RawEventHeader,
+    pub file_path: [u8; 256],
+    pub source_inode: u64,
+    pub retval: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawFileSymlinkEvent {
+    pub header: RawEventHeader,
+    pub file_path: [u8; 256],
+    pub target: [u8; 256],
+    pub inode: u64,
+    pub retval: i32,
 }
 
 #[repr(C)]

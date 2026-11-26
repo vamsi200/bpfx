@@ -145,7 +145,7 @@ impl BitOrAssign for ProtocolMask {
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct NetworkMask(u8);
+pub struct NetworkMask(u16);
 
 impl NetworkMask {
     pub const CONNECT: Self = Self(1 << 0);
@@ -153,9 +153,22 @@ impl NetworkMask {
     pub const CLOSE: Self = Self(1 << 2);
     pub const BIND: Self = Self(1 << 3);
     pub const LISTEN: Self = Self(1 << 4);
+    pub const SEND: Self = Self(1 << 5);
+    pub const RECEIVE: Self = Self(1 << 6);
+    pub const TCP_RETRANSMIT: Self = Self(1 << 7);
+    pub const TCP_STATE_CHANGE: Self = Self(1 << 8);
 
-    pub const ALL: Self =
-        Self(Self::CONNECT.0 | Self::ACCEPT.0 | Self::CLOSE.0 | Self::BIND.0 | Self::LISTEN.0);
+    pub const ALL: Self = Self(
+        Self::CONNECT.0
+            | Self::ACCEPT.0
+            | Self::CLOSE.0
+            | Self::BIND.0
+            | Self::LISTEN.0
+            | Self::SEND.0
+            | Self::RECEIVE.0
+            | Self::TCP_RETRANSMIT.0
+            | Self::TCP_STATE_CHANGE.0,
+    );
 
     pub fn contains(&self, other: &Self) -> bool {
         self.0 & other.0 == other.0
@@ -435,6 +448,10 @@ pub enum NetworkEvent {
     Close(CloseEvent),
     Bind(BindEvent),
     Listen(ListenEvent),
+    Send(SendEvent),
+    Receive(ReceiveEvent),
+    TcpRetransmit(TcpRetransmitEvent),
+    TcpStateChange(TcpStateChangeEvent),
 }
 
 impl Display for NetworkEvent {
@@ -445,6 +462,10 @@ impl Display for NetworkEvent {
             Self::Close(e) => e.fmt(f),
             Self::Bind(e) => e.fmt(f),
             Self::Listen(e) => e.fmt(f),
+            Self::Send(e) => e.fmt(f),
+            Self::Receive(e) => e.fmt(f),
+            Self::TcpRetransmit(e) => e.fmt(f),
+            Self::TcpStateChange(e) => e.fmt(f),
         }
     }
 }
@@ -473,6 +494,10 @@ impl NetworkEvent {
             Self::Close(e) => &e.protocol,
             Self::Bind(e) => &e.protocol,
             Self::Listen(e) => &e.protocol,
+            Self::Send(e) => &e.protocol,
+            Self::Receive(e) => &e.protocol,
+            Self::TcpRetransmit(e) => &e.protocol,
+            Self::TcpStateChange(e) => &e.protocol,
         }
     }
 
@@ -497,6 +522,10 @@ impl NetworkEvent {
             Self::Close(e) => &e.header,
             Self::Bind(e) => &e.header,
             Self::Listen(e) => &e.header,
+            Self::Send(e) => &e.header,
+            Self::Receive(e) => &e.header,
+            Self::TcpStateChange(e) => &e.header,
+            Self::TcpRetransmit(e) => &e.header,
         }
     }
 
@@ -509,6 +538,10 @@ impl NetworkEvent {
             Self::Close(e) => &e.endpoints,
             Self::Bind(e) => &e.endpoints,
             Self::Listen(e) => &e.endpoints,
+            Self::Send(e) => &e.endpoints,
+            Self::Receive(e) => &e.endpoints,
+            Self::TcpRetransmit(e) => &e.endpoints,
+            Self::TcpStateChange(e) => &e.endpoints,
         }
     }
 }
@@ -525,4 +558,98 @@ impl BitOr for NetworkFilter {
     }
 }
 
-//NOTE: In future maybe include udp_sendmsg, udpv6_sendmsg for udp?
+#[non_exhaustive]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct SendEvent {
+    pub header: EventHeader,
+    pub protocol: Protocol,
+    pub endpoints: SocketEndpoints,
+    pub requested_len: u64,
+    pub retval: i32,
+}
+
+impl Display for SendEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} SEND {} len={} retval={}",
+            self.header, self.protocol, self.endpoints, self.requested_len, self.retval,
+        )
+    }
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct ReceiveEvent {
+    pub header: EventHeader,
+    pub protocol: Protocol,
+    pub endpoints: SocketEndpoints,
+    pub requested_len: u64,
+    pub flags: i32,
+    pub retval: i32,
+}
+
+impl Display for ReceiveEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} RECEIVE {} len={} flags={} retval={}",
+            self.header, self.protocol, self.endpoints, self.requested_len, self.flags, self.retval,
+        )
+    }
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct TcpRetransmitEvent {
+    pub header: EventHeader,
+    pub protocol: Protocol,
+    pub endpoints: SocketEndpoints,
+    pub state: i32,
+}
+
+impl Display for TcpRetransmitEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} TCP_RETRANSMIT {} state={}",
+            self.header, self.protocol, self.endpoints, self.state,
+        )
+    }
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct TcpStateChangeEvent {
+    pub header: EventHeader,
+    pub protocol: Protocol,
+    pub endpoints: SocketEndpoints,
+    pub old_state: i32,
+    pub new_state: i32,
+}
+
+impl Display for TcpStateChangeEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} TCP_STATE_CHANGE {} old_state={} new_state={}",
+            self.header, self.protocol, self.endpoints, self.old_state, self.new_state,
+        )
+    }
+}

@@ -2,7 +2,8 @@
 #![no_std]
 #![allow(non_camel_case_types)]
 
-pub mod bindings;
+mod bindings;
+mod trace_bindings;
 
 use crate::bindings::{
     dentry, file, fop_flags_t, in6_addr, inode, kernfs_open_file, mount, path, renamedata,
@@ -13,7 +14,7 @@ use aya_ebpf::helpers::r#gen::{
 };
 use aya_ebpf::helpers::{
     bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_probe_read_kernel,
-    bpf_probe_read_kernel_buf,
+    bpf_probe_read_kernel_buf, bpf_probe_read_kernel_str_bytes,
 };
 use aya_ebpf::macros::tracepoint;
 use aya_ebpf::maps::{HashMap, LruHashMap, PerCpuArray, RingBuf};
@@ -27,6 +28,9 @@ use bpfx_common::raw::{IpVersion, RawProtocol};
 
 const AF_INET: u16 = 2;
 const AF_INET6: u16 = 10;
+
+const HARD_LINK: u64 = 0;
+const SYMBOLIC_LINK: u64 = 1;
 
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(4 * 1024 * 1024, 0);
@@ -122,6 +126,19 @@ struct PendingChmod {
 
 #[map]
 static CHMOD_PENDING: HashMap<u64, PendingChmod> = HashMap::with_max_entries(4096, 0);
+
+#[repr(C)]
+struct LinkPathKey {
+    pid_tgid: u64,
+    dentry_addr: u64,
+    operation: u64,
+}
+
+#[map]
+static LINK_PATHS: LruHashMap<LinkPathKey, [u8; 256]> = LruHashMap::with_max_entries(4096, 0);
+
+#[map]
+static SYMLINK_EVENT_TEMP: PerCpuArray<RawFileSymlinkEvent> = PerCpuArray::with_max_entries(1, 0);
 
 static UNLINK_PATH_FMT: [u8; 6] = *b"%s/%s\0";
 static UNLINK_ROOT_FMT: [u8; 5] = *b"%s%s\0";
@@ -516,6 +533,233 @@ fn try_udpv6_connect(ctx: FExitContext) -> Result<i32, i32> {
         }
         emit_v6(sock, Some(ctx.arg(3)), 2, EventType::Connect)
     }
+}
+
+#[inline(always)]
+fn read_network_endpoints(sk: *const sock) -> Result<RawNetworkEndpoints, i32> {
+    if sk.is_null() {
+        return Err(-22);
+    }
+
+    unsafe {
+        let family = bpf_probe_read_kernel(core::ptr::addr_of!((*sk).__sk_common.skc_family))
+            .map_err(|_| -14)?;
+
+        let (ip_version, src_addr, dst_addr) = match family {
+            AF_INET => {
+                let mut src = [0; 16];
+                let mut dst = [0; 16];
+                src[..4].copy_from_slice(&sock_rcv_saddr(sk).to_ne_bytes());
+                dst[..4].copy_from_slice(&sock_daddr(sk).to_ne_bytes());
+                (IpVersion::V4, src, dst)
+            }
+            AF_INET6 => {
+                let src = read_v6_addr(core::ptr::addr_of!((*sk).__sk_common.skc_v6_rcv_saddr))
+                    .map_err(|_| -14)?;
+                let dst = read_v6_addr(core::ptr::addr_of!((*sk).__sk_common.skc_v6_daddr))
+                    .map_err(|_| -14)?;
+                (IpVersion::V6, src, dst)
+            }
+            _ => return Err(-97),
+        };
+
+        Ok(RawNetworkEndpoints {
+            src_addr,
+            dst_addr,
+            src_port: sock_num(sk),
+            dst_port: sock_dport(sk),
+            ip_version,
+        })
+    }
+}
+
+#[fexit]
+pub fn tcp_sendmsg_exit(ctx: FExitContext) -> i32 {
+    emit_send(&ctx, 1)
+}
+
+#[fexit]
+pub fn udp_sendmsg_exit(ctx: FExitContext) -> i32 {
+    emit_send(&ctx, 2)
+}
+
+#[inline(always)]
+fn emit_send(ctx: &FExitContext, protocol: u8) -> i32 {
+    let header = build_event_header(EventType::Send);
+    if filter_events(FilterOwner::Network, &header, None, None) {
+        return 0;
+    }
+
+    let Ok(protocol) = RawProtocol::try_from(protocol) else {
+        return 0;
+    };
+    let sk: *const sock = unsafe { ctx.arg(0) };
+    let Ok(endpoints) = read_network_endpoints(sk) else {
+        return 0;
+    };
+    let requested_len: usize = unsafe { ctx.arg(2) };
+    let retval: i32 = unsafe { ctx.arg(3) };
+
+    if let Some(mut entry) = EVENTS.reserve::<RawSendEvent>(0) {
+        entry.write(RawSendEvent {
+            header,
+            protocol,
+            endpoints,
+            requested_len: requested_len as u64,
+            retval,
+        });
+        entry.submit(0);
+    }
+
+    0
+}
+
+#[fexit]
+pub fn tcp_recvmsg_exit(ctx: FExitContext) -> i32 {
+    emit_receive(&ctx, 1, 3, 4)
+}
+
+#[fexit]
+pub fn udp_recvmsg_exit(ctx: FExitContext) -> i32 {
+    emit_receive(&ctx, 2, 3, 4)
+}
+
+#[inline(always)]
+fn emit_receive(ctx: &FExitContext, protocol: u8, flags_arg: usize, retval_arg: usize) -> i32 {
+    let header = build_event_header(EventType::Receive);
+    if filter_events(FilterOwner::Network, &header, None, None) {
+        return 0;
+    }
+
+    let Ok(protocol) = RawProtocol::try_from(protocol) else {
+        return 0;
+    };
+    let sk: *const sock = unsafe { ctx.arg(0) };
+    let Ok(endpoints) = read_network_endpoints(sk) else {
+        return 0;
+    };
+    let requested_len: usize = unsafe { ctx.arg(2) };
+    let flags: i32 = unsafe { ctx.arg(flags_arg) };
+    let retval: i32 = unsafe { ctx.arg(retval_arg) };
+
+    if let Some(mut entry) = EVENTS.reserve::<RawReceiveEvent>(0) {
+        entry.write(RawReceiveEvent {
+            header,
+            protocol,
+            endpoints,
+            requested_len: requested_len as u64,
+            flags,
+            retval,
+        });
+        entry.submit(0);
+    }
+
+    0
+}
+
+type RetransmitTrace = trace_bindings::trace_event_raw_tcp_retransmit_skb;
+type StateChangeTrace = trace_bindings::trace_event_raw_inet_sock_set_state;
+
+macro_rules! trace_field {
+    ($data:expr, $field:ident) => {
+        bpf_probe_read_kernel(core::ptr::addr_of!((*$data).$field)).map_err(|_| -14)?
+    };
+}
+
+macro_rules! trace_endpoints {
+    ($data:expr) => {{
+        let family: u16 = trace_field!($data, family);
+        let (ip_version, src_addr, dst_addr) = match family {
+            AF_INET => {
+                let src: [u8; 4] = trace_field!($data, saddr);
+                let dst: [u8; 4] = trace_field!($data, daddr);
+                let mut src_addr = [0; 16];
+                let mut dst_addr = [0; 16];
+                src_addr[..4].copy_from_slice(&src);
+                dst_addr[..4].copy_from_slice(&dst);
+                (IpVersion::V4, src_addr, dst_addr)
+            }
+            AF_INET6 => (
+                IpVersion::V6,
+                trace_field!($data, saddr_v6),
+                trace_field!($data, daddr_v6),
+            ),
+            _ => return Err(-97),
+        };
+        let dst_port: u16 = trace_field!($data, dport);
+
+        RawNetworkEndpoints {
+            src_addr,
+            dst_addr,
+            src_port: trace_field!($data, sport),
+            dst_port: dst_port.to_be(),
+            ip_version,
+        }
+    }};
+}
+
+#[tracepoint]
+pub fn tcp_retransmit_skb(ctx: TracePointContext) -> u32 {
+    let _ = try_tcp_retransmit_skb(&ctx);
+    0
+}
+
+#[inline(always)]
+fn try_tcp_retransmit_skb(ctx: &TracePointContext) -> Result<(), i32> {
+    let header = build_event_header(EventType::TcpRetransmit);
+    if filter_events(FilterOwner::Network, &header, None, None) {
+        return Ok(());
+    }
+
+    let record = unsafe {
+        let data = ctx.as_ptr().cast::<RetransmitTrace>();
+        RawTcpRetransmitEvent {
+            header,
+            endpoints: trace_endpoints!(data),
+            state: trace_field!(data, state),
+        }
+    };
+
+    if let Some(mut entry) = EVENTS.reserve::<RawTcpRetransmitEvent>(0) {
+        entry.write(record);
+        entry.submit(0);
+    }
+    Ok(())
+}
+
+#[tracepoint]
+pub fn inet_sock_set_state(ctx: TracePointContext) -> u32 {
+    let _ = try_inet_sock_set_state(&ctx);
+    0
+}
+
+#[inline(always)]
+fn try_inet_sock_set_state(ctx: &TracePointContext) -> Result<(), i32> {
+    let record = unsafe {
+        let data = ctx.as_ptr().cast::<StateChangeTrace>();
+        let protocol = trace_field!(data, protocol) as u16;
+        if protocol != 6 {
+            return Ok(());
+        }
+
+        let header = build_event_header(EventType::TcpStateChange);
+        if filter_events(FilterOwner::Network, &header, None, None) {
+            return Ok(());
+        }
+
+        RawTcpStateChangeEvent {
+            header,
+            endpoints: trace_endpoints!(data),
+            old_state: trace_field!(data, oldstate),
+            new_state: trace_field!(data, newstate),
+        }
+    };
+
+    if let Some(mut entry) = EVENTS.reserve::<RawTcpStateChangeEvent>(0) {
+        entry.write(record);
+        entry.submit(0);
+    }
+    Ok(())
 }
 
 #[tracepoint]
@@ -1663,6 +1907,172 @@ fn try_chmod_common_exit(ctx: &FExitContext) -> Result<(), i32> {
         entry.submit(0);
 
         Ok(())
+    }
+}
+
+#[inline(always)]
+fn link_path_key(child: *const dentry, operation: u64) -> LinkPathKey {
+    LinkPathKey {
+        pid_tgid: bpf_get_current_pid_tgid(),
+        dentry_addr: child as u64,
+        operation,
+    }
+}
+
+#[inline(always)]
+fn capture_link_path(parent: *const path, child: *const dentry, operation: u64, previous_ret: i32) {
+    let key = link_path_key(child, operation);
+    let _ = LINK_PATHS.remove(&key);
+
+    if previous_ret != 0 || parent.is_null() || child.is_null() {
+        return;
+    }
+
+    let Some(path_ptr) = PATH_BUF.get_ptr_mut(0) else {
+        return;
+    };
+
+    unsafe {
+        let path_buf = &mut *path_ptr;
+        if resolve_path(parent, child, path_buf).is_ok() {
+            let _ = LINK_PATHS.insert(&key, path_buf, 0);
+        }
+    }
+}
+
+#[lsm(hook = "path_link", sleepable)]
+pub fn path_link(ctx: LsmContext) -> i32 {
+    unsafe {
+        let previous_ret: i32 = ctx.arg(3);
+        capture_link_path(ctx.arg(1), ctx.arg(2), HARD_LINK, previous_ret);
+        previous_ret
+    }
+}
+
+#[lsm(hook = "path_symlink", sleepable)]
+pub fn path_symlink(ctx: LsmContext) -> i32 {
+    unsafe {
+        let previous_ret: i32 = ctx.arg(3);
+        capture_link_path(ctx.arg(0), ctx.arg(1), SYMBOLIC_LINK, previous_ret);
+        previous_ret
+    }
+}
+
+#[inline(always)]
+fn take_link_path(child: *const dentry, operation: u64, out: &mut [u8; 256]) -> bool {
+    let key = link_path_key(child, operation);
+
+    unsafe {
+        if let Some(saved) = LINK_PATHS.get(&key) {
+            *out = *saved;
+            let _ = LINK_PATHS.remove(&key);
+            true
+        } else {
+            *out = [0; 256];
+            false
+        }
+    }
+}
+
+#[inline(always)]
+fn link_inode_number(entry: *const dentry) -> u64 {
+    if entry.is_null() {
+        return 0;
+    }
+
+    unsafe {
+        let Ok(inode) = bpf_probe_read_kernel(core::ptr::addr_of!((*entry).d_inode)) else {
+            return 0;
+        };
+        if inode.is_null() {
+            return 0;
+        }
+
+        bpf_probe_read_kernel(core::ptr::addr_of!((*inode).i_ino)).unwrap_or(0) as u64
+    }
+}
+
+#[fexit]
+fn vfs_link_exit(ctx: FExitContext) -> i32 {
+    unsafe {
+        let source: *const dentry = ctx.arg(0);
+        let destination: *const dentry = ctx.arg(3);
+        let retval: i32 = ctx.arg(5);
+
+        let mut file_path = [0; 256];
+        let has_path = take_link_path(destination, HARD_LINK, &mut file_path);
+        let header = build_event_header(EventType::FileLink);
+        let filter_path = if has_path { Some(&file_path) } else { None };
+
+        if filter_events(FilterOwner::File, &header, filter_path, None) {
+            return 0;
+        }
+
+        let source_inode = link_inode_number(source);
+        let Some(mut entry) = EVENTS.reserve::<RawFileLinkEvent>(0) else {
+            return 0;
+        };
+
+        entry.write(RawFileLinkEvent {
+            header,
+            file_path,
+            source_inode,
+            retval,
+        });
+        entry.submit(0);
+        0
+    }
+}
+
+#[fexit]
+fn vfs_symlink_exit(ctx: FExitContext) -> i32 {
+    unsafe {
+        let destination: *const dentry = ctx.arg(2);
+        let target: *const u8 = ctx.arg(3);
+        let retval: i32 = ctx.arg(4);
+
+        let Some(record_ptr) = SYMLINK_EVENT_TEMP.get_ptr_mut(0) else {
+            return 0;
+        };
+
+        unsafe {
+            let record = &mut *record_ptr;
+            let has_path = take_link_path(destination, SYMBOLIC_LINK, &mut record.file_path);
+            let header = build_event_header(EventType::FileSymLink);
+            let filter_path = if has_path {
+                Some(&record.file_path)
+            } else {
+                None
+            };
+
+            if filter_events(FilterOwner::File, &header, filter_path, None) {
+                return 0;
+            }
+
+            record.header = header;
+            record.inode = if retval == 0 {
+                link_inode_number(destination)
+            } else {
+                0
+            };
+            record.retval = retval;
+            record.target = [0; 256];
+
+            if !target.is_null()
+                && bpf_probe_read_kernel_str_bytes(target, &mut record.target).is_err()
+            {
+                record.target = [0; 256];
+            }
+
+            let Some(mut entry) = EVENTS.reserve::<RawFileSymlinkEvent>(0) else {
+                return 0;
+            };
+
+            entry.write(*record);
+            entry.submit(0);
+        }
+
+        0
     }
 }
 

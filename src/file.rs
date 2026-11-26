@@ -524,8 +524,11 @@ pub enum FileEvent {
     FileSync(FileSyncEvent),
     FileChown(FileChownEvent),
     FileChmod(FileChmodEvent),
+    FileLink(FileLinkEvent),
+    FileSymLink(FileSymlinkEvent),
 }
 
+//TODO: Update this entire thing accordingly later.
 /// Identifies a file event for deduplication.
 ///
 /// The key contains only the fields that are relevant for determining whether
@@ -573,6 +576,10 @@ pub enum FileEventKey {
     FileChown { inode: u64, retval: i32 },
 
     FileChmod { inode: u64, retval: i32 },
+
+    FileLink { retval: i32 },
+
+    FileSymLink { retval: i32 },
 }
 
 impl FileEvent {
@@ -639,6 +646,10 @@ impl FileEvent {
                 inode: e.inode,
                 retval: e.retval,
             },
+
+            FileEvent::FileLink(e) => FileEventKey::FileLink { retval: e.retval },
+
+            FileEvent::FileSymLink(e) => FileEventKey::FileSymLink { retval: e.retval },
         }
     }
 
@@ -661,6 +672,8 @@ impl FileEvent {
             FileEvent::FileSync(_) => FileMask::FILE_SYNC,
             FileEvent::FileChown(_) => FileMask::FILE_CHOWN,
             FileEvent::FileChmod(_) => FileMask::FILE_CHMOD,
+            FileEvent::FileLink(_) => FileMask::FILE_LINK,
+            FileEvent::FileSymLink(_) => FileMask::FILE_SYMLINK,
         }
     }
 
@@ -683,6 +696,8 @@ impl FileEvent {
             Self::FileSync(e) => &e.header,
             Self::FileChown(e) => &e.header,
             Self::FileChmod(e) => &e.header,
+            Self::FileLink(e) => &e.header,
+            Self::FileSymLink(e) => &e.header,
         }
     }
 
@@ -785,6 +800,8 @@ impl FileEvent {
             Self::FileSync(e) => e.retval as isize,
             Self::FileChown(e) => e.retval as isize,
             Self::FileChmod(e) => e.retval as isize,
+            Self::FileLink(e) => e.retval as isize,
+            Self::FileSymLink(e) => e.retval as isize,
         }
     }
 
@@ -822,6 +839,8 @@ impl FileEvent {
             Self::FileSync(e) => Some(e.inode),
             Self::FileChown(e) => Some(e.inode),
             Self::FileChmod(e) => Some(e.inode),
+            Self::FileLink(_) => None,
+            Self::FileSymLink(e) => e.inode,
         }
     }
 }
@@ -884,6 +903,8 @@ impl FileMask {
     pub const FILE_SYNC: Self = Self(1 << 10);
     pub const FILE_CHOWN: Self = Self(1 << 11);
     pub const FILE_CHMOD: Self = Self(1 << 12);
+    pub const FILE_LINK: Self = Self(1 << 13);
+    pub const FILE_SYMLINK: Self = Self(1 << 14);
 
     pub const ALL: Self = Self(
         Self::CREATE.0
@@ -898,7 +919,9 @@ impl FileMask {
             | Self::TRUNCATE.0
             | Self::FILE_SYNC.0
             | Self::FILE_CHOWN.0
-            | Self::FILE_CHMOD.0,
+            | Self::FILE_CHMOD.0
+            | Self::FILE_LINK.0
+            | Self::FILE_SYMLINK.0,
     );
 
     pub fn contains(&self, other: &Self) -> bool {
@@ -1326,5 +1349,56 @@ impl Display for FileChmodEvent {
             self.inode_mode & 0o7777,
             self.retval,
         )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FileLinkEvent {
+    pub header: EventHeader,
+    pub file_path: Option<String>,
+    pub source_inode: u64,
+    pub retval: i32,
+}
+
+impl Display for FileLinkEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let path = self.file_path.as_deref().unwrap_or("<path unavailable>");
+        write!(
+            f,
+            "{} LINK {} source_inode={} retval={}",
+            self.header, path, self.source_inode, self.retval,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "archive",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FileSymlinkEvent {
+    pub header: EventHeader,
+    pub file_path: Option<String>,
+    pub target: Option<String>,
+    pub inode: Option<u64>,
+    pub retval: i32,
+}
+
+impl Display for FileSymlinkEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let path = self.file_path.as_deref().unwrap_or("<path unavailable>");
+        let target = self.target.as_deref().unwrap_or("<target unavailable>");
+
+        write!(f, "{} SYMLINK {} -> {}", self.header, path, target)?;
+        if let Some(inode) = self.inode {
+            write!(f, " inode={inode}")?;
+        }
+        write!(f, " retval={}", self.retval)
     }
 }

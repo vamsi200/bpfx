@@ -1,14 +1,16 @@
 use crate::error::Result;
 use crate::file::{
     FileChmodEvent, FileChownEvent, FileCloseEvent, FileCreateEvent, FileDeleteEvent, FileEvent,
-    FileFilter, FileOpenEvent, FileReadEvent, FileRegister, FileRenameEvent, FileSyncEvent,
-    FileTruncateEvent, FileType, FileWriteEvent, MkdirEvent, RmdirEvent,
+    FileFilter, FileLinkEvent, FileOpenEvent, FileReadEvent, FileRegister, FileRenameEvent,
+    FileSymlinkEvent, FileSyncEvent, FileTruncateEvent, FileType, FileWriteEvent, MkdirEvent,
+    RmdirEvent,
 };
 use crate::memory::MemRegister;
 use crate::memory::MemoryUnmapEvent;
 use crate::memory::{MemoryEvent, MemoryFilter, MemoryMapEvent, MemoryMask};
 use crate::network::{
-    BindEvent, ListenEvent, NetworkFilter, NetworkRegister, Protocol, ProtocolMask,
+    BindEvent, ListenEvent, NetworkFilter, NetworkRegister, Protocol, ProtocolMask, ReceiveEvent,
+    SendEvent, TcpRetransmitEvent, TcpStateChangeEvent,
 };
 use crate::process::{ProcessEvent, ProcessExitEvent, ProcessFilter, ProcessMask};
 use crate::{FileMask, NetworkMask, process::*};
@@ -592,6 +594,71 @@ pub(crate) fn attach_tracepoint(
     Ok(())
 }
 
+#[inline]
+fn try_send_network_event(producer: &mpsc::Sender<NetworkEvent>, event: NetworkEvent) {
+    match producer.try_send(event) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            log::warn!("dropping network event: channel is full");
+        }
+        Err(TrySendError::Closed(_)) => {
+            log::warn!("dropping network event: receiver has been closed");
+        }
+    }
+}
+
+fn handle_send(event: &RawSendEvent, producer: &mpsc::Sender<NetworkEvent>) {
+    try_send_network_event(
+        producer,
+        NetworkEvent::Send(SendEvent {
+            header: convert_header(event.header),
+            protocol: convert_protocol(event.protocol),
+            endpoints: convert_endpoints(event.endpoints),
+            requested_len: event.requested_len,
+            retval: event.retval,
+        }),
+    );
+}
+
+fn handle_receive(event: &RawReceiveEvent, producer: &mpsc::Sender<NetworkEvent>) {
+    try_send_network_event(
+        producer,
+        NetworkEvent::Receive(ReceiveEvent {
+            header: convert_header(event.header),
+            protocol: convert_protocol(event.protocol),
+            endpoints: convert_endpoints(event.endpoints),
+            requested_len: event.requested_len,
+            flags: event.flags,
+            retval: event.retval,
+        }),
+    );
+}
+
+fn handle_tcp_retransmit(event: &RawTcpRetransmitEvent, producer: &mpsc::Sender<NetworkEvent>) {
+    try_send_network_event(
+        producer,
+        NetworkEvent::TcpRetransmit(TcpRetransmitEvent {
+            header: convert_header(event.header),
+            protocol: Protocol::Tcp,
+            endpoints: convert_endpoints(event.endpoints),
+            state: event.state,
+        }),
+    );
+}
+
+fn handle_tcp_state_change(event: &RawTcpStateChangeEvent, producer: &mpsc::Sender<NetworkEvent>) {
+    try_send_network_event(
+        producer,
+        NetworkEvent::TcpStateChange(TcpStateChangeEvent {
+            header: convert_header(event.header),
+            protocol: Protocol::Tcp,
+            endpoints: convert_endpoints(event.endpoints),
+            old_state: event.old_state,
+            new_state: event.new_state,
+        }),
+    );
+}
+
 fn handle_connect(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) {
     let (header, endpoints) = parse_network_event(event);
 
@@ -698,6 +765,18 @@ fn handle_close(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) {
     }
 }
 
+const TCP_SEND: &[(&str, &str)] = &[("tcp_sendmsg_exit", "tcp_sendmsg")];
+const UDP_SEND: &[(&str, &str)] = &[("udp_sendmsg_exit", "udp_sendmsg")];
+
+const TCP_RECEIVE: &[(&str, &str)] = &[("tcp_recvmsg_exit", "tcp_recvmsg")];
+const UDP_RECEIVE: &[(&str, &str)] = &[("udp_recvmsg_exit", "udp_recvmsg")];
+
+const TCP_RETRANSMIT: &[(&str, &str, &str)] =
+    &[("tcp_retransmit_skb", "tcp", "tcp_retransmit_skb")];
+
+const TCP_STATE_CHANGE: &[(&str, &str, &str)] =
+    &[("inet_sock_set_state", "sock", "inet_sock_set_state")];
+
 pub(crate) fn attach_network_probe(
     filter: &NetworkFilter,
     bpf: &mut Ebpf,
@@ -705,6 +784,54 @@ pub(crate) fn attach_network_probe(
 ) -> crate::error::Result<()> {
     log::info!("attaching network probe..");
     write_to_fiter_map(&Filters::Network(filter), FilterOwner::Network, bpf)?;
+
+    if filter.protocol_mask.contains(&ProtocolMask::TCP)
+        && filter.event_mask.contains(&NetworkMask::SEND)
+    {
+        for probe in TCP_SEND {
+            attach_fexit(bpf, btf, probe.0, probe.1)?;
+        }
+    }
+
+    if filter.protocol_mask.contains(&ProtocolMask::UDP)
+        && filter.event_mask.contains(&NetworkMask::SEND)
+    {
+        for probe in UDP_SEND {
+            attach_fexit(bpf, btf, probe.0, probe.1)?;
+        }
+    }
+
+    if filter.protocol_mask.contains(&ProtocolMask::TCP)
+        && filter.event_mask.contains(&NetworkMask::RECEIVE)
+    {
+        for probe in TCP_RECEIVE {
+            attach_fexit(bpf, btf, probe.0, probe.1)?;
+        }
+    }
+
+    if filter.protocol_mask.contains(&ProtocolMask::UDP)
+        && filter.event_mask.contains(&NetworkMask::RECEIVE)
+    {
+        for probe in UDP_RECEIVE {
+            attach_fexit(bpf, btf, probe.0, probe.1)?;
+        }
+    }
+
+    if filter.protocol_mask.contains(&ProtocolMask::TCP)
+        && filter.event_mask.contains(&NetworkMask::TCP_RETRANSMIT)
+    {
+        for probe in TCP_RETRANSMIT {
+            attach_tracepoint(bpf, probe.0, probe.1, probe.2)?;
+        }
+    }
+
+    if filter.protocol_mask.contains(&ProtocolMask::TCP)
+        && filter.event_mask.contains(&NetworkMask::TCP_STATE_CHANGE)
+    {
+        for probe in TCP_STATE_CHANGE {
+            attach_tracepoint(bpf, probe.0, probe.1, probe.2)?;
+        }
+    }
 
     if filter.protocol_mask.contains(&ProtocolMask::TCP)
         && filter.event_mask.contains(&NetworkMask::CONNECT)
@@ -802,10 +929,49 @@ fn handle_listen(event: &PendingConnect, producer: &mpsc::Sender<NetworkEvent>) 
 }
 
 fn check_size<T>(len: usize) -> Result<()> {
-    if len != std::mem::size_of::<T>() {
-        return Err(crate::error::Error::MalformedEvent);
+    let expected = std::mem::size_of::<T>();
+
+    if len != expected {
+        return Err(crate::error::Error::MalformedEvent(format!(
+            "{} expected {expected} bytes, got {len}",
+            std::any::type_name::<T>(),
+        )));
     }
+
     Ok(())
+}
+
+#[inline]
+fn convert_endpoints(raw: RawNetworkEndpoints) -> SocketEndpoints {
+    match raw.ip_version {
+        IpVersion::V4 => {
+            let mut local = [0u8; 4];
+            let mut remote = [0u8; 4];
+            local.copy_from_slice(&raw.src_addr[..4]);
+            remote.copy_from_slice(&raw.dst_addr[..4]);
+
+            SocketEndpoints {
+                local_ip: IpAddr::from(local),
+                local_port: raw.src_port,
+                remote_ip: IpAddr::from(remote),
+                remote_port: raw.dst_port,
+            }
+        }
+        IpVersion::V6 => SocketEndpoints {
+            local_ip: IpAddr::from(raw.src_addr),
+            local_port: raw.src_port,
+            remote_ip: IpAddr::from(raw.dst_addr),
+            remote_port: raw.dst_port,
+        },
+    }
+}
+
+#[inline]
+fn convert_protocol(raw: RawProtocol) -> Protocol {
+    match raw {
+        RawProtocol::Tcp => Protocol::Tcp,
+        RawProtocol::Udp => Protocol::Udp,
+    }
 }
 
 pub fn convert_network_events(
@@ -814,16 +980,54 @@ pub fn convert_network_events(
 ) -> crate::error::Result<()> {
     let ptr = events.as_ptr();
 
-    check_size::<PendingConnect>(events.len())?;
+    let len = events.len();
+    let header_size = std::mem::size_of::<RawEventHeader>();
 
-    let event = unsafe { std::ptr::read_unaligned(ptr.cast::<PendingConnect>()) };
+    if len < header_size {
+        return Err(crate::error::Error::MalformedEvent(format!(
+            "network event header requires at least {header_size} bytes, got {len}",
+        )));
+    }
 
-    match event.header.event_type {
-        EventType::Connect => handle_connect(&event, producer),
-        EventType::Accept => handle_tcp_accept(&event, producer),
-        EventType::Close => handle_close(&event, producer),
-        EventType::Bind => handle_bind(&event, producer),
-        EventType::Listen => handle_listen(&event, producer),
+    let header = unsafe { std::ptr::read_unaligned(ptr.cast::<RawEventHeader>()) };
+
+    match header.event_type {
+        EventType::Connect
+        | EventType::Accept
+        | EventType::Close
+        | EventType::Bind
+        | EventType::Listen => {
+            check_size::<PendingConnect>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr.cast::<PendingConnect>()) };
+            match event.header.event_type {
+                EventType::Connect => handle_connect(&event, producer),
+                EventType::Accept => handle_tcp_accept(&event, producer),
+                EventType::Close => handle_close(&event, producer),
+                EventType::Bind => handle_bind(&event, producer),
+                EventType::Listen => handle_listen(&event, producer),
+                _ => unreachable!(),
+            }
+        }
+        EventType::Send => {
+            check_size::<RawSendEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr.cast::<RawSendEvent>()) };
+            handle_send(&event, producer);
+        }
+        EventType::Receive => {
+            check_size::<RawReceiveEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr.cast::<RawReceiveEvent>()) };
+            handle_receive(&event, producer);
+        }
+        EventType::TcpRetransmit => {
+            check_size::<RawTcpRetransmitEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr.cast::<RawTcpRetransmitEvent>()) };
+            handle_tcp_retransmit(&event, producer);
+        }
+        EventType::TcpStateChange => {
+            check_size::<RawTcpStateChangeEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr.cast::<RawTcpStateChangeEvent>()) };
+            handle_tcp_state_change(&event, producer);
+        }
         _ => {}
     }
 
@@ -879,7 +1083,7 @@ fn convert_process_events(
     let ptr = events.as_ptr();
 
     if events.len() < std::mem::size_of::<RawEventHeader>() {
-        return Err(crate::error::Error::MalformedEvent);
+        return Err(crate::error::Error::MalformedEvent("RawEventHeader".into()));
     }
 
     let header = unsafe { std::ptr::read_unaligned(ptr as *const RawEventHeader) };
@@ -985,6 +1189,16 @@ pub(crate) fn attach_file_probe(
 
     attach_fexit(bpf, btf, "__fput", "__fput")?;
 
+    if filter.event_type.contains(&FileMask::FILE_LINK) {
+        attach_fexit(bpf, btf, "vfs_link_exit", "vfs_link")?;
+        attach_lsm(bpf, btf, "path_link")?;
+    }
+
+    if filter.event_type.contains(&FileMask::FILE_SYMLINK) {
+        attach_fexit(bpf, btf, "vfs_symlink_exit", "vfs_symlink")?;
+        attach_lsm(bpf, btf, "path_symlink")?;
+    }
+
     if filter.event_type.contains(&FileMask::FILE_CHMOD) {
         attach_fexit(bpf, btf, "chmod_common_exit", "chmod_common")?;
         attach_lsm(bpf, btf, "path_chmod")?;
@@ -1081,11 +1295,85 @@ fn convert_file_events(
     let ptr = events.as_ptr();
 
     if events.len() < size_of::<RawEventHeader>() {
-        return Err(crate::error::Error::MalformedEvent);
+        return Err(crate::error::Error::MalformedEvent("RawEventHeader".into()));
     }
     let header = unsafe { std::ptr::read_unaligned(ptr as *const RawEventHeader) };
 
     match header.event_type {
+        EventType::FileLink => {
+            check_size::<RawFileLinkEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileLinkEvent) };
+
+            let file_path = if event.file_path[0] == 0 {
+                None
+            } else {
+                let path_len = event
+                    .file_path
+                    .iter()
+                    .position(|&x| x == 0)
+                    .unwrap_or(event.file_path.len());
+                Some(String::from_utf8_lossy(&event.file_path[..path_len]).into_owned())
+            };
+
+            match producer.try_send(FileEvent::FileLink(FileLinkEvent {
+                header: convert_header(event.header),
+                file_path,
+                source_inode: event.source_inode,
+                retval: event.retval as i32,
+            })) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
+                }
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
+                }
+            }
+        }
+
+        EventType::FileSymLink => {
+            check_size::<RawFileSymlinkEvent>(events.len())?;
+            let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileSymlinkEvent) };
+
+            let file_path = if event.file_path[0] == 0 {
+                None
+            } else {
+                let path_len = event
+                    .file_path
+                    .iter()
+                    .position(|&x| x == 0)
+                    .unwrap_or(event.file_path.len());
+                Some(String::from_utf8_lossy(&event.file_path[..path_len]).into_owned())
+            };
+
+            let target = if event.target[0] == 0 {
+                None
+            } else {
+                let target_len = event
+                    .target
+                    .iter()
+                    .position(|&x| x == 0)
+                    .unwrap_or(event.target.len());
+                Some(String::from_utf8_lossy(&event.target[..target_len]).into_owned())
+            };
+
+            match producer.try_send(FileEvent::FileSymLink(FileSymlinkEvent {
+                header: convert_header(event.header),
+                file_path,
+                target,
+                inode: (event.inode != 0).then_some(event.inode),
+                retval: event.retval as i32,
+            })) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    log::warn!("dropping file event: channel is full");
+                }
+                Err(TrySendError::Closed(_)) => {
+                    log::warn!("dropping file event: receiver has been closed");
+                }
+            }
+        }
+
         EventType::FileChmod => {
             check_size::<RawFileChmodEvent>(events.len())?;
             let event = unsafe { std::ptr::read_unaligned(ptr as *const RawFileChmodEvent) };
@@ -1584,7 +1872,7 @@ fn convert_mem_events(
 ) -> crate::error::Result<()> {
     let ptr = events.as_ptr();
     if events.len() < size_of::<RawEventHeader>() {
-        return Err(crate::error::Error::MalformedEvent);
+        return Err(crate::error::Error::MalformedEvent("RawEventHeader".into()));
     }
 
     let header = unsafe { ptr::read(ptr as *const RawEventHeader) };

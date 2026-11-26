@@ -39,8 +39,8 @@ pub enum Error {
     #[error("failed to access EVENTS ring buffer")]
     EventsMapAccess,
 
-    #[error("Malformed Event")]
-    MalformedEvent,
+    #[error("malformed event: {0}")]
+    MalformedEvent(String),
 
     #[error("Already Subscribed")]
     AlreadySubscribed,
